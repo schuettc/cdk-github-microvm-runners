@@ -67,15 +67,15 @@ export interface NormalizedImageOptions {
 }
 
 /**
- * Paths warmed when the consumer names none: the Node runtime the agent and
- * every JavaScript action run on, `git` (which `actions/checkout` forks before
- * it does anything else), and the runner's own assemblies.
+ * Paths warmed when the consumer names none: the Node runtime that every
+ * JavaScript action runs on, and `git`, which `actions/checkout` forks before
+ * it does anything else. Between them they account for the checkout cost.
+ *
+ * `/opt/runner` is deliberately NOT here. Including it read 305 MiB across 400
+ * files on a live bench run — hundreds of megabytes of .NET assemblies a job
+ * never touches — which is spend without a matching return.
  */
-export const DEFAULT_WARM_PATHS = [
-  '/usr/bin/node',
-  '/usr/bin/git',
-  '/opt/runner',
-];
+export const DEFAULT_WARM_PATHS = ['/usr/bin/node', '/usr/bin/git'];
 
 /** True when `warmPaths` is exactly the default set, in order. */
 function isDefaultWarmPaths(paths: string[]): boolean {
