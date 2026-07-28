@@ -267,3 +267,52 @@ describe('toolchains', () => {
     );
   });
 });
+
+describe('warmPaths', () => {
+  it('bakes the default hot set into an ENV the in-VM agent reads at /ready', () => {
+    const rendered = renderDockerfile(normalizeImageOptions({}));
+
+    expect(rendered).toContain(
+      'ENV MICROVM_RUNNER_WARM_PATHS="/usr/bin/node:/usr/bin/git:/opt/runner"',
+    );
+  });
+
+  it('omits the ENV entirely when warming is turned off with an empty array', () => {
+    // `[]` has to survive the `??` that fills in the default — an
+    // implementation testing falsiness rather than `undefined` would quietly
+    // warm the default set here, which is the opposite of what was asked.
+    const rendered = renderDockerfile(normalizeImageOptions({ warmPaths: [] }));
+
+    expect(rendered).not.toContain('MICROVM_RUNNER_WARM_PATHS');
+  });
+
+  it('joins consumer paths with the colon separator the agent splits on', () => {
+    const rendered = renderDockerfile(
+      normalizeImageOptions({ warmPaths: ['/usr/bin/python3', '/opt/tools'] }),
+    );
+
+    expect(rendered).toContain(
+      'ENV MICROVM_RUNNER_WARM_PATHS="/usr/bin/python3:/opt/tools"',
+    );
+  });
+
+  it('rejects a path containing the separator instead of splitting it in the VM', () => {
+    // A colon would arrive at the agent as two paths, neither of which exists,
+    // so warming would silently do nothing. Failing at synth is the only point
+    // where that is visible.
+    expect(() => normalizeImageOptions({ warmPaths: ['/opt/a:b'] })).toThrow(
+      /contains a colon/,
+    );
+  });
+
+  it('changes the content hash, so a different warm set publishes a new image', () => {
+    expect(hashOf({ warmPaths: ['/usr/bin/node'] })).not.toBe(hashOf({}));
+    expect(hashOf({ warmPaths: [] })).not.toBe(hashOf({}));
+  });
+
+  it('hashes identically when the default set is passed explicitly', () => {
+    expect(
+      hashOf({ warmPaths: ['/usr/bin/node', '/usr/bin/git', '/opt/runner'] }),
+    ).toBe(hashOf({}));
+  });
+});
