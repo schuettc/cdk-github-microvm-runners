@@ -20,10 +20,16 @@ without `warmPoolSize` cold-launch every job, which is the default.
 
 A cold launch boots a VM from the class's image, then registers a runner
 against it. The warm path resumes a VM that is already booted, so the boot is
-gone from the job's critical path. Resuming is the faster of the two by roughly
-a factor of four, so the saving is seconds per job — worth having on a class
-that runs short jobs often, and close to irrelevant on one that runs long
-builds occasionally.
+gone from the job's critical path.
+
+The saving is the boot, and only the boot. Measured on a bench runner, the
+launcher's own slice — enqueue through to the VM running — came out at 6.3–9.0 s
+warm against 3.8–7.2 s cold. Those ranges overlap on small samples, so treat the
+warm path as removing boot from the critical path rather than as a fixed
+multiple faster. Everything after the VM is running is unchanged: the runner
+still starts and registers per job, which is most of the wait either way. See
+[Start latency](architecture.md#start-latency) for where the time actually
+goes.
 
 Nothing about the job changes. A job cannot tell which path served it, and the
 image, size, and labels are the same either way. Only the wait before it starts
