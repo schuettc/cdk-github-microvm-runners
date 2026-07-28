@@ -15,7 +15,14 @@
 // the looser suffix match here.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { openSync, mkdirSync, appendFileSync } from 'node:fs';
+import {
+  openSync,
+  mkdirSync,
+  appendFileSync,
+  writeFileSync,
+  statSync,
+  readdirSync,
+} from 'node:fs';
 
 // Boot timings are written to a FILE, not to stdout. The VM console log group
 // does not capture the agent's early output at all — the startup banner appears
@@ -23,6 +30,16 @@ import { openSync, mkdirSync, appendFileSync } from 'node:fs';
 // appeared seven times. A job can read this file; it cannot read what was never
 // captured.
 const TRACE = '/var/log/microvm-runner-boot.log';
+// TRUNCATED at agent start. The image build boots a VM and runs the ready
+// probe, and the snapshot captures the filesystem afterwards -- so without this
+// every VM launches carrying the BUILD's entries, and runtime events read as
+// ~535 s offsets from a boot that happened during the build.
+try {
+  mkdirSync('/var/log', { recursive: true });
+  writeFileSync(TRACE, '');
+} catch {
+  // Tracing must never be able to fail a boot.
+}
 function note(msg) {
   try {
     appendFileSync(TRACE, `${Date.now()} ${msg}\n`);
@@ -107,37 +124,86 @@ let warmed = false;
 function warmUp() {
   if (warmed || WARM_PATHS.length === 0) return;
   warmed = true;
-  // Single-quoted for the shell, with embedded quotes escaped, so a path
-  // containing a space or a metacharacter cannot turn into extra words.
-  const quoted = WARM_PATHS.map((p) => `'${p.split("'").join(`'\\''`)}'`).join(
-    ' ',
-  );
-  // `xargs -0 cat` batches many files per process; `cat` per file via -I{}
-  // would spend the budget on process startup instead of on reading. `wc -c`
-  // costs nothing next to the read and makes the volume observable.
-  const script =
-    `echo "$(date +%s%3N) warm-start" >> ${TRACE}; ` +
-    `B=$(find ${quoted} -xdev -type f 2>/dev/null | head -n ${WARM_MAX_FILES} ` +
-    `| tr '\\n' '\\0' | xargs -0 -r cat 2>/dev/null | wc -c); ` +
-    // Executing resolves the interpreter and shared libraries as well as the
-    // binary. Only the two we ship are executed; configured paths are read.
-    `node --version > /dev/null 2>&1; git --version > /dev/null 2>&1; ` +
-    `echo "$(date +%s%3N) warm-end bytes=$B" >> ${TRACE}`;
+
+  // The WALK happens here; the READ happens in a detached child.
+  //
+  // Walking is directory metadata and costs milliseconds. Reading is hundreds
+  // of megabytes and must never touch this event loop — an earlier version read
+  // with readSync inline and stalled the agent for 854 s, so it could not answer
+  // the /run call carrying the JIT config.
+  //
+  // NEITHER STEP MAY USE `find` OR `xargs`. The al2023-minimal base does not
+  // ship findutils, and nothing in the package set adds it. The shell version of
+  // this reported `bytes=0` while claiming success, because `find` was not found,
+  // stderr went to /dev/null, and `wc -c` of nothing is zero. Node is the one
+  // interpreter the image contract guarantees, so both halves use it.
+  const files = [];
+  const walk = (p, depth) => {
+    if (files.length >= WARM_MAX_FILES) return;
+    let st;
+    try {
+      st = statSync(p);
+    } catch {
+      return; // A configured path that is absent must not fail boot.
+    }
+    if (st.isDirectory()) {
+      if (depth > 8) return;
+      let entries = [];
+      try {
+        entries = readdirSync(p);
+      } catch {
+        return;
+      }
+      for (const e of entries) walk(`${p}/${e}`, depth + 1);
+    } else if (st.isFile() && st.size > 0) {
+      files.push(p);
+    }
+  };
+  for (const p of WARM_PATHS) walk(p, 0);
+  if (files.length === 0) {
+    note('warm-skipped no-files');
+    return;
+  }
+
+  // The list goes via a file rather than argv, which has a length limit that a
+  // few thousand paths would exceed.
+  const listPath = '/tmp/microvm-runner-warm.list';
   try {
-    // NOT nice'd. An earlier version ran at `nice -n 19` on the theory that
-    // warming should yield to runner registration. Decomposing queue latency
-    // showed the opposite: 29 of 41 s is `Runner.Listener` starting inside an
-    // already-RUNNING VM, paging in the very assemblies this reads. Warming is
-    // not competing with that work, it is prefetching for it — sequentially and
-    // in bulk, rather than 4 KB at a time on demand — so it has to run at
-    // normal priority to get ahead.
-    const c = spawn('timeout', [String(WARM_TIMEOUT_S), 'sh', '-c', script], {
+    writeFileSync(listPath, files.join('\n'));
+  } catch (e) {
+    note(`warm-list-failed ${e}`);
+    return;
+  }
+
+  // The child enforces its own deadline, so the budget holds without depending
+  // on `timeout` being present either.
+  const child = `
+    const fs = require('fs');
+    const files = fs.readFileSync(process.argv[1], 'utf8').split('\n').filter(Boolean);
+    const deadline = Date.now() + ${WARM_TIMEOUT_S} * 1000;
+    const buf = Buffer.allocUnsafe(1 << 20);
+    let bytes = 0, read = 0;
+    for (const f of files) {
+      if (Date.now() > deadline) break;
+      let fd;
+      try {
+        fd = fs.openSync(f, 'r');
+        let n;
+        while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) bytes += n;
+        read++;
+      } catch {} finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch {} } }
+    }
+    try { fs.appendFileSync(${JSON.stringify(TRACE)},
+      Date.now() + ' warm-end bytes=' + bytes + ' files=' + read + ' of=' + files.length + '\n'); } catch {}
+  `;
+  try {
+    const c = spawn(process.execPath, ['-e', child, listPath], {
       detached: true,
       stdio: 'ignore',
     });
     c.on('error', (e) => note(`warm-spawn-failed ${e}`));
     c.unref();
-    note(`warm-spawned paths=${WARM_PATHS.length} budget=${WARM_TIMEOUT_S}s`);
+    note(`warm-start files=${files.length} budget=${WARM_TIMEOUT_S}s`);
   } catch (e) {
     note(`warm-start-error ${e}`);
   }
