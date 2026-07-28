@@ -1715,7 +1715,6 @@ const runnerImageOptions: RunnerImageOptions = { ... }
 | <code><a href="#cdk-github-microvm-runners.RunnerImageOptions.property.setupCommands">setupCommands</a></code> | <code>string[]</code> | Extra `RUN` commands, executed in order after packages, assets, and environment variables are laid down. |
 | <code><a href="#cdk-github-microvm-runners.RunnerImageOptions.property.systemPackages">systemPackages</a></code> | <code>string[]</code> | Extra `dnf` packages to install alongside the fixed base set. |
 | <code><a href="#cdk-github-microvm-runners.RunnerImageOptions.property.toolchains">toolchains</a></code> | <code><a href="#cdk-github-microvm-runners.RunnerToolchain">RunnerToolchain</a>[]</code> | Language runtimes to bake into the hosted tool cache, so `actions/setup-*` finds them without downloading anything. |
-| <code><a href="#cdk-github-microvm-runners.RunnerImageOptions.property.warmPaths">warmPaths</a></code> | <code>string[]</code> | Paths the in-VM agent pages into memory during the boot handshake, before any job runs. Directories are walked. |
 
 ---
 
@@ -1805,27 +1804,6 @@ public readonly toolchains: RunnerToolchain[];
 Language runtimes to bake into the hosted tool cache, so `actions/setup-*` finds them without downloading anything.
 
 An image with none of these is smaller; one toolchain entry is needed per version your workflows ask for.
-
----
-
-##### `warmPaths`<sup>Optional</sup> <a name="warmPaths" id="cdk-github-microvm-runners.RunnerImageOptions.property.warmPaths"></a>
-
-```typescript
-public readonly warmPaths: string[];
-```
-
-- *Type:* string[]
-- *Default:* ['/usr/bin/node', '/usr/bin/git', '/opt/runner']
-
-Paths the in-VM agent pages into memory during the boot handshake, before any job runs. Directories are walked.
-
-A MicroVM's pages fault in on first access, so the first run of a binary
-costs far more than the second — enough that `actions/checkout` spends most
-of its time waiting for `node` to page in. Warming moves that cost into the
-idle window between boot and job assignment.
-
-Point this at the interpreters and tools your jobs reach for first. Set it
-to `[]` to turn warming off entirely.
 
 ---
 
