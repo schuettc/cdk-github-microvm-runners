@@ -149,8 +149,8 @@ jobs:
           NPM_DIST_TAG: latest
           NPM_REGISTRY: registry.npmjs.org
           NPM_CONFIG_PROVENANCE: "true"
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           PUBLIB_DRYRUN: ${{ inputs.dry_run }}
+          NPM_TRUSTED_PUBLISHER: "true"
         run: npx -p publib@0.2.1056 publib-npm
   release_pypi:
     name: Publish to PyPI
