@@ -85,6 +85,46 @@ A runner class that sets `warmPoolSize` adds a seventh piece: the **warm-pool
 Lambda**, on its own schedule, which keeps that class's pool at its target by
 pre-booting VMs and suspending them until a launch claims one.
 
+## Start latency
+
+A job waits from the moment GitHub queues it until a runner picks it up. On a
+GitHub-hosted runner that is two or three seconds, because GitHub keeps machines
+booted and already registered. Here it is the time to build a machine, and it is
+worth knowing where it goes before trying to shorten it.
+
+Measured on a bench runner, a cold `GB1` launch of a queued job:
+
+| Segment                                  | Time     | What happens                                         |
+| ---------------------------------------- | -------- | ---------------------------------------------------- |
+| Queued → the VM is running               | 6.8 s    | webhook delivery, the queue, the launcher, VM boot   |
+| VM running → the runner's first log line | 8.2 s    | `run.sh`, the .NET host starting, assemblies loading |
+| Runner starting → connected to GitHub    | 9.0 s    | reading its configuration, registering               |
+| Connected → the job begins               | 1.0 s    | GitHub assigns the queued job to it                  |
+| **Total**                                | **25 s** |                                                      |
+
+Three roughly equal thirds rather than one dominant cost. Queue latency is also
+load-dependent: the same measurement ranges from about 25 s on a quiet set to
+45 s with fifteen jobs launching at once.
+
+**The last two segments are a floor.** A runner configured just-in-time has to
+start and register for every job, because that is what makes it single-use — the
+credential it registers with is minted for one job and is useless afterwards.
+Roughly 17 seconds of the total is that property being enforced. A warm pool
+removes the first segment, and nothing removes the other two.
+
+That is the trade the design makes. GitHub's fleet is fast to start because its
+machines are already registered and shared; a runner here is registered for your
+job alone and destroyed after it. If start latency matters more than isolation
+for a particular workflow, the honest answer is to leave that job on a
+GitHub-hosted runner — the two fleets coexist in one workflow, and
+[Onboarding](onboarding.md) covers routing jobs between them.
+
+Start latency is also billed. A MicroVM starts charging when it reaches the
+running state, which happens early in that chain, so a job pays for roughly
+thirty seconds of a VM that has no job on it yet. That is a fixed cost per job
+rather than a per-minute one, which is why short jobs cost proportionally more
+here and long ones proportionally less.
+
 ## State: the runner table
 
 The MicroVM service's VM list says which VMs a runner set is running, and a set

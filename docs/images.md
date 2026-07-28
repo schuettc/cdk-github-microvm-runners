@@ -164,6 +164,15 @@ GitHub Actions runner when a job arrives. What it needs to do that:
 | **`sudo`**                                                              | which is how it does so                                      |
 | **Both agent files copied in, and `entrypoint.sh` as the `ENTRYPOINT`** | nothing starts the agent otherwise                           |
 
+The base image is `al2023-minimal`, and it is genuinely minimal. Two absences
+catch people out: **`find` and `xargs` are not installed** — `findutils` is not
+part of the base package set — and neither is anything else you might assume
+from a fuller distribution. A script that shells out to `find` gets
+"command not found", which with `2>/dev/null` is indistinguishable from finding
+nothing. Node is the one interpreter the contract guarantees, so prefer it for
+anything that walks the filesystem, or install what you need explicitly through
+`systemPackages`.
+
 Only the last of those is checked for you, and only partly: the construct
 looks for a line referencing `microvm-runner/agent.mjs` and refuses a
 Dockerfile without one. It cannot check the rest, because there is no reliable
