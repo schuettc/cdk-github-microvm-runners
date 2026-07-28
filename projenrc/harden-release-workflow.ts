@@ -56,41 +56,41 @@ export function hardenReleaseWorkflow(): void {
   }
 
   // --- 2. Publish to npm with a trusted publisher ------------------------------
-// projen surfaces `trustedPublishing` on PyPiPublishOptions (reachable through
-// `publishToPypi`) but not on the npm side — NpmPublishOptions carries the
-// same flag and no project-level option reaches it. So it is set here.
-//
-// publib-npm reads NPM_TRUSTED_PUBLISHER and, when it is set, unsets NPM_TOKEN
-// itself and lets the npm CLI exchange the job's OIDC token for a short-lived
-// publish token. `id-token: write` is already on this job.
-//
-// This only works once a trusted publisher is registered on npmjs.com against
-// this repository and release.yml. npm cannot configure one for a package that
-// does not exist, so the first version had to be published with a credential;
-// every version after it needs none.
-const npmJob = doc.jobs.release_npm;
-const npmRelease = (npmJob?.steps ?? []).find(
-  (s: any) => typeof s.run === 'string' && s.run.includes('publib-npm'),
-);
-if (!npmRelease) {
-  throw new Error(
-    'harden-release-workflow: no publib-npm step found in release_npm — the ' +
-      'workflow shape changed and npm trusted publishing has nowhere to go.',
+  // projen surfaces `trustedPublishing` on PyPiPublishOptions (reachable through
+  // `publishToPypi`) but not on the npm side — NpmPublishOptions carries the
+  // same flag and no project-level option reaches it. So it is set here.
+  //
+  // publib-npm reads NPM_TRUSTED_PUBLISHER and, when it is set, unsets NPM_TOKEN
+  // itself and lets the npm CLI exchange the job's OIDC token for a short-lived
+  // publish token. `id-token: write` is already on this job.
+  //
+  // This only works once a trusted publisher is registered on npmjs.com against
+  // this repository and release.yml. npm cannot configure one for a package that
+  // does not exist, so the first version had to be published with a credential;
+  // every version after it needs none.
+  const npmJob = doc.jobs.release_npm;
+  const npmRelease = (npmJob?.steps ?? []).find(
+    (s: any) => typeof s.run === 'string' && s.run.includes('publib-npm'),
   );
-}
-npmRelease.env = npmRelease.env ?? {};
-if (!('NPM_TOKEN' in npmRelease.env)) {
-  throw new Error(
-    'harden-release-workflow: release_npm no longer passes NPM_TOKEN. If ' +
-      'projen started doing trusted publishing itself, delete this block ' +
-      'rather than leaving it to fight the generated output.',
-  );
-}
-delete npmRelease.env.NPM_TOKEN;
-npmRelease.env.NPM_TRUSTED_PUBLISHER = 'true';
-console.log('  npm publishes with a trusted publisher, no token');
+  if (!npmRelease) {
+    throw new Error(
+      'harden-release-workflow: no publib-npm step found in release_npm — the ' +
+        'workflow shape changed and npm trusted publishing has nowhere to go.',
+    );
+  }
+  npmRelease.env = npmRelease.env ?? {};
+  if (!('NPM_TOKEN' in npmRelease.env)) {
+    throw new Error(
+      'harden-release-workflow: release_npm no longer passes NPM_TOKEN. If ' +
+        'projen started doing trusted publishing itself, delete this block ' +
+        'rather than leaving it to fight the generated output.',
+    );
+  }
+  delete npmRelease.env.NPM_TOKEN;
+  npmRelease.env.NPM_TRUSTED_PUBLISHER = 'true';
+  console.log('  npm publishes with a trusted publisher, no token');
 
-// --- 2. Refuse to release from anything but main -----------------------------
+  // --- 2. Refuse to release from anything but main -----------------------------
   // `workflow_dispatch` has no branch filter, so without this anyone with write
   // access can dispatch a release from any branch and publish that branch's code
   // as this package.
