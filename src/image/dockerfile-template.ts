@@ -33,21 +33,6 @@ export interface RunnerImageOptions {
   readonly toolchains?: RunnerToolchain[];
   /** Extra Linux capabilities granted to the MicroVM's operating system. @default ['ALL'] */
   readonly additionalOsCapabilities?: string[];
-  /**
-   * Paths the in-VM agent pages into memory during the boot handshake, before
-   * any job runs. Directories are walked.
-   *
-   * A MicroVM's pages fault in on first access, so the first run of a binary
-   * costs far more than the second — enough that `actions/checkout` spends most
-   * of its time waiting for `node` to page in. Warming moves that cost into the
-   * idle window between boot and job assignment.
-   *
-   * Point this at the interpreters and tools your jobs reach for first. Set it
-   * to `[]` to turn warming off entirely.
-   *
-   * @default ['/usr/bin/node', '/usr/bin/git', '/opt/runner']
-   */
-  readonly warmPaths?: string[];
 }
 
 /**
@@ -63,34 +48,6 @@ export interface NormalizedImageOptions {
   readonly environment: Record<string, string>;
   readonly toolchains: RunnerToolchain[];
   readonly additionalOsCapabilities: string[];
-  readonly warmPaths: string[];
-}
-
-/**
- * Paths warmed when the consumer names none.
- *
- * `/opt/runner` is the important one, and an earlier version of this dropped it
- * on the reasoning that a job never touches those .NET assemblies. That was
- * wrong about who reads them: decomposing queue latency showed **29 of 41
- * seconds** is `Runner.Listener` starting inside an already-RUNNING VM, paging
- * in exactly those files — before any job exists. It is the largest single term
- * in start-up latency, and unlike job time it is billed while nothing runs.
- *
- * `node` and `git` are cheap by comparison and cover the `actions/checkout`
- * cost, which is what the first version was aimed at.
- */
-export const DEFAULT_WARM_PATHS = [
-  '/opt/runner',
-  '/usr/bin/node',
-  '/usr/bin/git',
-];
-
-/** True when `warmPaths` is exactly the default set, in order. */
-function isDefaultWarmPaths(paths: string[]): boolean {
-  return (
-    paths.length === DEFAULT_WARM_PATHS.length &&
-    paths.every((p, i) => p === DEFAULT_WARM_PATHS[i])
-  );
 }
 
 /**
@@ -115,13 +72,6 @@ export function normalizeImageOptions(
       );
     }
   }
-  for (const p of opts.warmPaths ?? []) {
-    if (p.includes(':')) {
-      throw new Error(
-        `RunnerImage: warmPaths entry "${p}" contains a colon, which is the separator the in-VM agent splits on — it would be read as two paths, neither of which exists.`,
-      );
-    }
-  }
   return {
     runnerVersion: opts.runnerVersion?.version ?? DEFAULT_RUNNER_VERSION,
     systemPackages: [...(opts.systemPackages ?? [])],
@@ -132,9 +82,6 @@ export function normalizeImageOptions(
     additionalOsCapabilities: [
       ...(opts.additionalOsCapabilities ?? DEFAULT_ADDITIONAL_OS_CAPABILITIES),
     ],
-    // `[]` is a real choice (warming off), so it has to survive `??` — which
-    // is why this checks for `undefined` rather than falsiness.
-    warmPaths: [...(opts.warmPaths ?? DEFAULT_WARM_PATHS)],
   };
 }
 
@@ -286,14 +233,6 @@ export function renderDockerfile(o: NormalizedImageOptions): string {
       ...renderToolchainLines(o.toolchains),
       ...o.assets.map((a, i) => `COPY assets/${i}/ ${a.target}`),
       ...envEntries.map(([k, v]) => `ENV ${k}="${escapeEnvValue(v)}"`),
-      // Consumed by the in-VM agent at the /ready hook. Colon-separated to
-      // match PATH convention; a path containing a colon is rejected in
-      // normalize rather than silently split here.
-      ...(o.warmPaths.length
-        ? [
-            `ENV MICROVM_RUNNER_WARM_PATHS="${escapeEnvValue(o.warmPaths.join(':'))}"`,
-          ]
-        : []),
       ...o.setupCommands.map((c) => `RUN ${c}`),
       'COPY microvm-runner/agent.mjs /opt/microvm-runner/agent.mjs',
       'COPY microvm-runner/entrypoint.sh /opt/microvm-runner/entrypoint.sh',
@@ -348,7 +287,6 @@ export function computeContentHash(
     ...(isDefaultAdditionalOsCapabilities(o.additionalOsCapabilities)
       ? {}
       : { additionalOsCapabilities: o.additionalOsCapabilities }),
-    ...(isDefaultWarmPaths(o.warmPaths) ? {} : { warmPaths: o.warmPaths }),
   });
   return createHash('sha256')
     .update(dockerfile)
