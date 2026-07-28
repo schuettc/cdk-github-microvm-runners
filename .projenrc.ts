@@ -64,6 +64,13 @@ const project = new awscdk.AwsCdkConstructLibrary({
   publishToPypi: {
     distName: 'cdk-github-microvm-runners',
     module: 'cdk_github_microvm_runners',
+    // Publish with a PyPI trusted publisher rather than a stored token. PyPI
+    // supports a PENDING publisher — one configured before the project exists
+    // — so unlike npm this needs no bootstrap release and no credential at
+    // any point. It must be registered on pypi.org against this repository
+    // and `release.yml`, or the release job has nothing to exchange its OIDC
+    // token for.
+    trustedPublishing: true,
   },
 
   // Handlers use @aws-sdk clients and ship PRE-BUNDLED (esbuild, all SDK
