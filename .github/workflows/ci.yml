@@ -1,0 +1,68 @@
+# CI — the UNBYPASSABLE BACKSTOP. Runs on every PR into `dev` or `main`.
+#
+# Parity by construction: this job runs `just verify` — the EXACT recipe the
+# pre-push git hook runs (see lefthook.yml + justfile). Same commands, same
+# project-pinned tools → if it passed locally on push, it passes here. The
+# local hooks can be skipped (--no-verify, lefthook not installed); a required
+# status check on this workflow cannot. That's the point of running it again.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+  # Also run on pushes to dev/main so the base branch always has a fresh status
+  # (required-check enforcement needs a passing run recorded on the base).
+  push:
+    branches: [dev, main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # No `version:` — package.json's `packageManager` field, which projen
+      # owns, is the one place pnpm's version is stated. action-setup v6 fails
+      # outright when both are set.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install just
+        uses: extractions/setup-just@v3
+
+      - name: Install dependencies
+        # --ignore-scripts: don't run install/postinstall lifecycle scripts
+        # for any (transitive) dependency in CI — supply-chain hardening.
+        # Matches pnpm v10's own secure-by-default posture (build scripts
+        # already require explicit `pnpm approve-builds` opt-in locally); no
+        # dependency here relies on a build-time postinstall step.
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The single source of truth — identical to the pre-push hook. Covers
+      # projen drift, formatting, doc-block drift, the jsii compile (which
+      # typechecks and proves the API projects to every target language), and
+      # the test suite with lint.
+      - name: Verify
+        run: just verify
+
+      # Build the real tarball, install it into a clean project, and synthesize
+      # a runner set from it. Everything above runs against the source tree,
+      # where the Lambda bundles and agent assets are present regardless; this
+      # is the only check that sees what a consumer actually installs. The
+      # Python and Go artifacts are built by the release workflow, which
+      # installs those toolchains per publish job.
+      - name: Consumer smoke test
+        run: just smoke

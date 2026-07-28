@@ -1,0 +1,94 @@
+# Docs site — builds runnerset.dev on every PR, deploys it from `main`.
+#
+# THE DEPLOY JOB IS INERT TODAY, BY DESIGN. GitHub Pages does not serve from a
+# private repository on a Free personal account, so Pages is not enabled here
+# and `deploy` cannot succeed until the repo goes public at first publish.
+# Enabling Pages (Settings → Pages → Source: GitHub Actions) is a step at
+# publish time, not a bug to chase. A red `deploy` before then is a not-yet.
+#
+# The two jobs are split for that reason. `build` runs on every PR and on
+# pushes to `main`, so a site that no longer builds fails review — the check
+# that has value right now. `deploy` is guarded to `main` and is the only part
+# that needs Pages.
+#
+# The site is a separate pnpm project under site/, with its own lockfile, kept
+# out of the root package.json so Astro's tree stays out of the published
+# package. That is why this workflow installs from site/ rather than reusing
+# the root install in ci.yml.
+
+name: Docs
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [main]
+
+concurrency:
+  # Not cancel-in-progress on main: a deploy that is halfway through publishing
+  # an artifact should finish rather than leave Pages on a partial upload.
+  group: docs-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # No `version:` — package.json's `packageManager` field, which projen
+      # owns, is the one place pnpm's version is stated. action-setup v6 fails
+      # outright when both are set.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+
+      - name: Install dependencies
+        # --ignore-scripts, as in ci.yml: no lifecycle scripts from any
+        # (transitive) dependency. The site's own `prebuild` is a package
+        # script, not an install hook, so it still runs under `build`.
+        run: pnpm --dir site install --frozen-lockfile --ignore-scripts
+
+      # `prebuild` regenerates site/src/content/docs/api.md from the repository
+      # root's API.md, which is committed, so this needs no library compile.
+      # The guides come from docs/ through the symlink at
+      # site/src/content/docs/guides, so a checkout is all the content there is.
+      - name: Build the site
+        run: pnpm --dir site build
+
+      # site/public/CNAME is copied verbatim into dist/ by Astro and is how
+      # Pages learns to serve the custom domain. If it ever stops being copied,
+      # the deploy would quietly fall back to the github.io URL — so assert it.
+      - name: Check the custom domain survived the build
+        run: |
+          test "$(cat site/dist/CNAME)" = "runnerset.dev"
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    # Only `main` deploys. On a PR the build above is the whole point of the
+    # run; there is no preview environment.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # create the Pages deployment
+      id-token: write # OIDC — how deploy-pages authenticates the artifact
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

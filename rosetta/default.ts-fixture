@@ -1,0 +1,74 @@
+// Ambient context for every code example in this project.
+//
+// jsii-rosetta splices each API example at the `/// here` marker below and
+// compiles the result, which is how the Construct Hub pages for Python and Go
+// get their samples. scripts/check-doc-examples.mjs splices the guide examples
+// in docs/*.md at the same marker. One file so the two cannot disagree about
+// what a snippet may assume.
+//
+// Most examples are excerpts: they show the one call being explained and leave
+// the surrounding stack implied by the prose. The declares below are that
+// surrounding. When a new example uses a name that is not here, the gate fails
+// with "Cannot find name" — add the declare and the example is covered.
+//
+// Imports are fallbacks only: rosetta hoists a snippet's own imports above
+// these, and check-doc-examples.mjs drops any fixture import whose binding the
+// snippet claims itself. There is no node import here on purpose: rosetta
+// compiles snippets without node types, so an example that needs a directory
+// takes a plain relative string rather than path.join(__dirname, ...).
+// The struct types are here because a `fragment=` fence
+// in docs/ is compiled as a literal of the struct it names, so the name has to
+// be in scope even though no snippet writes it.
+import * as cdk from 'aws-cdk-lib';
+import { Duration } from 'aws-cdk-lib';
+import * as cw from 'aws-cdk-lib/aws-cloudwatch';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import {
+  ConsoleLogs,
+  GithubAppId,
+  GithubAppKey,
+  GithubAuth,
+  GithubMicrovmRunners,
+  GithubMicrovmRunnersProps,
+  ImageLogs,
+  MicrovmSize,
+  RunnerImage,
+  RunnerImageOptions,
+  RunnerNetwork,
+  RunnerScope,
+  RunnerToolchain,
+  RunnerVersion,
+  WebhookEndpoint,
+} from 'cdk-github-microvm-runners';
+
+// The runner set and the stack it lives in.
+declare const app: cdk.App;
+declare const stack: cdk.Stack;
+declare const runners: GithubMicrovmRunners;
+
+// Images the examples reuse across runner classes.
+declare const image: RunnerImage;
+declare const leanImage: RunnerImage;
+declare const heavyImage: RunnerImage;
+
+// The two required props, when an example shows only what it is changing.
+declare const github: GithubAuth;
+declare const scope: RunnerScope;
+
+// Consumer-owned resources the examples pass in.
+declare const vpc: ec2.IVpc;
+declare const mySecurityGroup: ec2.ISecurityGroup;
+declare const role: iam.IRole;
+declare const logGroup: logs.ILogGroup;
+declare const myBuildLogGroup: logs.ILogGroup;
+declare const myConsoleLogGroup: logs.ILogGroup;
+declare const dashboard: cw.Dashboard;
+declare const topic: any;
+declare const bucket: any;
+declare const key: any;
+
+/// here

@@ -1,0 +1,20 @@
+---
+title: cdk-github-microvm-runners
+description: A CDK construct library that runs GitHub Actions jobs on AWS Lambda MicroVMs, one ephemeral runner per job.
+---
+
+A CDK construct library that runs GitHub Actions jobs on
+[AWS Lambda MicroVMs](https://docs.aws.amazon.com/lambda/latest/dg/lambda-microvms-guide.html).
+Each job runs on its own MicroVM in your AWS account, created when the job
+starts and removed once it finishes.
+
+A runner set is one `GithubMicrovmRunners` in a CDK stack, serving a GitHub
+organization or a list of repositories. It receives GitHub's `workflow_job`
+events, launches a MicroVM for each job, registers a single-use runner, and
+reconciles the result once the job is done. Within a runner set, a runner class
+pairs a `runs-on` label with the MicroVM size and image that jobs carrying that
+label run on, and a set can define more than one.
+
+[Getting started](/guides/getting-started/) covers the GitHub App, the secrets
+it needs in AWS Secrets Manager, deploying a runner set, and running a first
+job. The [API reference](/api/) carries every construct, property, and default.

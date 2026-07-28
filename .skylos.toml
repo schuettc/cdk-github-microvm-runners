@@ -1,0 +1,22 @@
+[skylos]
+# pnpm-lock.yaml's package integrity hashes (base64 SHA-512/SHA-1) read as
+# high-entropy strings to the secrets scanner — a guaranteed false positive
+# on every dependency change, since it's a machine-generated, package-manager
+# -owned file with no hand-typed content that could leak a secret. Same class
+# of exclusion as node_modules/dist, just not covered by the tool's own
+# default excludes (verified 2026-07-18: 20 CRITICAL "high-entropy value"
+# findings against pnpm-lock.yaml integrity hashes, none real).
+#
+# (2026-07-27) The site keeps its own lockfile, and the bare filename above
+# never matched it, so `site/pnpm-lock.yaml` reached the scanner and tripped a
+# SOURCE-CODE heuristic on it: "Security control regression: encryption call
+# was removed", pointing at a transitive dependency named `uncrypto`. A
+# lockfile has no calls to regress, so that finding cannot be true of this
+# file by construction — the same reasoning as the secrets exclusion above,
+# arriving through a different check.
+#
+# Both paths are listed rather than baselining the finding: a baseline entry
+# carries a line number, and every dependency change moves it, so it would
+# have to be re-accepted on each bump while silently covering whatever else
+# landed on that line.
+exclude = ["pnpm-lock.yaml", "site/pnpm-lock.yaml"]

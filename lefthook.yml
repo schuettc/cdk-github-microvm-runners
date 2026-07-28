@@ -1,0 +1,49 @@
+# lefthook.yml — git hooks. Install once per clone:  lefthook install
+#   brew install lefthook   (or:  npm i -D lefthook)
+#
+# Division of labor:
+#   pre-commit → fast AUTO-FIXERS on staged files (format, lint --fix) + the
+#                staged-file static scan. Kept fast so nobody reaches for --no-verify.
+#   pre-push   → `just verify` — the whole-project gate, IDENTICAL to what CI runs.
+#
+# The check commands themselves live in the justfile (single source of truth),
+# so local == CI. lefthook only decides *when* they run.
+
+pre-commit:
+  parallel: true
+  commands:
+    js-fix:
+      glob: '*.{ts,tsx,js,jsx,json,md,css,scss,yaml,yml}'
+      run: npx --yes prettier --write --ignore-unknown {staged_files}
+      stage_fixed: true
+    js-lint:
+      # ESLINT_USE_FLAT_CONFIG=false selects the .eslintrc.json projen
+      # generates; eslint 9 otherwise looks for a flat config and finds none.
+      glob: '*.{ts,tsx,js,jsx}'
+      run: ESLINT_USE_FLAT_CONFIG=false NODE_NO_WARNINGS=1 npx --yes eslint --fix {staged_files}
+      stage_fixed: true
+    # ── Static-analysis scans — the LOAD-BEARING anti-slop gates ──────────────
+    # Both gate NEW findings only, so the backlog (none yet — greenfield) is
+    # reported, never blocks.
+    skylos-scan:
+      # broad static analysis on staged code: code quality, dead code, complexity,
+      # clones, security/danger, secrets, dependencies (SCA), AI regressions.
+      # skylos `agent pre-commit` is cross-language (TS/JS/JSON), not just Python.
+      # SKYLOS_CONFIG_FILE points at .skylos.toml, which excludes
+      # pnpm-lock.yaml from secrets scanning (its integrity hashes are
+      # high-entropy false positives) — `--config-file` before the `agent`
+      # subcommand mis-parses, so use the env var instead.
+      glob: '*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,json}'
+      run: SKYLOS_CONFIG_FILE=.skylos.toml uvx skylos agent pre-commit .
+    fallow-scan:
+      # dead-code / complexity / duplication on CHANGED TS. --changed-since HEAD
+      # gates new-only. src/ is the planned TS source dir; lib/ covers CDK-style
+      # layouts if the scaffold lands there instead — fix the glob at scaffold
+      # time if the layout differs, then re-run /quality-verify-hook.
+      glob: 'src/**.{ts,tsx}'
+      run: npx --yes fallow audit --changed-since HEAD
+
+pre-push:
+  commands:
+    verify:
+      run: just verify # format-check + lint + typecheck + test+coverage — same as CI

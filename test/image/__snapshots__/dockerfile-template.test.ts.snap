@@ -1,0 +1,15 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`renderDockerfile matches the full default-render snapshot 1`] = `
+"FROM public.ecr.aws/lambda/microvms:al2023-minimal
+RUN dnf install -y libicu bash git docker jq tar zip unzip nodejs22 sudo shadow-utils && dnf clean all
+RUN dnf install -y gh --repofrompath gh-cli,https://cli.github.com/packages/rpm || true
+RUN curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install && rm -rf /tmp/aws /tmp/awscliv2.zip
+RUN useradd -m runner && usermod -aG docker runner || groupadd docker && usermod -aG docker runner
+RUN mkdir -p /opt/runner && cd /opt/runner && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.335.1/actions-runner-linux-arm64-2.335.1.tar.gz && tar xzf r.tgz && rm r.tgz && chown -R runner:runner /opt/runner
+COPY microvm-runner/agent.mjs /opt/microvm-runner/agent.mjs
+COPY microvm-runner/entrypoint.sh /opt/microvm-runner/entrypoint.sh
+RUN chmod +x /opt/microvm-runner/entrypoint.sh
+ENTRYPOINT ["/opt/microvm-runner/entrypoint.sh"]
+"
+`;

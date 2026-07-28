@@ -1,0 +1,98 @@
+# Region/feature watch — the freshness gate for SUPPORTED_REGIONS.
+#
+# AWS Lambda MicroVMs has no global-infrastructure SSM slug (the service is too
+# new), so src/regions.ts carries a hand-maintained SUPPORTED_REGIONS list. This
+# scheduled job probes every commercial region for MicroVMs availability and
+# fails if reality has drifted from that list — a red run is the signal to
+# update src/regions.ts. See scripts/check-microvm-regions.mts.
+#
+# Activation (maintainers): set a repository VARIABLE
+# `AWS_REGION_WATCH_ROLE_ARN` to an IAM role ARN this repo's OIDC can assume.
+# The role needs only:
+#   - ssm:GetParametersByPath   on arn:aws:ssm:*::parameter/aws/service/global-infrastructure/*
+#   - lambda-microvms:ListManagedMicrovmImages   on *
+# Until that variable is set (e.g. on forks), the job skips cleanly. Optionally
+# set `AWS_REGION_WATCH_REGION` to override the STS/SSM region (default us-east-1).
+# For full coverage the probe account should have opt-in regions ENABLED: a
+# disabled opt-in region is indistinguishable from an unsupported one at the API
+# level, so a MicroVMs launch there would go undetected until it is enabled.
+#
+# NOTE: GitHub auto-disables `schedule` workflows after 60 days with no repo
+# activity. On a low-traffic library this can silently kill the gate — re-enable
+# it from the Actions tab (or any push resets the clock).
+
+name: Region watch
+
+on:
+  schedule:
+    # Weekly, Mondays 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+concurrency:
+  group: region-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC — assume the read-only probe role
+  issues: write # open/update a tracking issue when the gate trips
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    # Role ARNs are not sensitive, so this lives in a repo variable — which
+    # (unlike a secret) is readable in a job-level `if`, letting the job skip
+    # cleanly wherever it isn't configured.
+    if: ${{ vars.AWS_REGION_WATCH_ROLE_ARN != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # No `version:` — see the note in ci.yml.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_REGION_WATCH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION_WATCH_REGION || 'us-east-1' }}
+
+      # Exit 0 = current, 1 = SUPPORTED_REGIONS is stale (update src/regions.ts),
+      # 2 = the probe itself was unreliable. Any non-zero fails the job — the
+      # staleness alarm. Output is teed so the failure step can quote it.
+      - name: Probe MicroVMs region availability
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm exec tsx scripts/check-microvm-regions.mts 2>&1 | tee region-watch.log
+
+      # A scheduled red run is easy to miss (no PR check; GitHub's failure email
+      # reaches only the last workflow editor), so surface it as a tracking issue
+      # — reused across runs so it doesn't spam a new issue every week.
+      - name: Open/update tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create region-watch --color FBCA04 \
+            --description "SUPPORTED_REGIONS freshness gate" 2>/dev/null || true
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          BODY=$(printf 'The scheduled region-watch run failed (%s UTC).\n\nRun: %s\n\n```\n%s\n```' \
+            "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_URL" "$(tail -50 region-watch.log 2>/dev/null)")
+          EXISTING=$(gh issue list --state open --label region-watch \
+            --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "Region watch: SUPPORTED_REGIONS needs review" \
+              --label region-watch --body "$BODY"
+          fi

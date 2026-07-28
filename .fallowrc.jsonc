@@ -1,0 +1,143 @@
+{
+  // fallow infers entry points from package.json `main`, which points at the
+  // COMPILED lib/index.js — it cannot trace from there back into src/, so
+  // every file downstream of src/index.ts reads as unreachable (the construct
+  // itself included). State the real entries instead: the library's public
+  // barrel, and each Lambda handler, which the construct references by path
+  // rather than importing. Test files are entries too — jest executes them, so
+  // nothing imports them, but their imports ARE real usage: listing them here
+  // rather than ignoring test/** keeps test-only devDependencies (undici,
+  // aws-sdk-client-mock) and test-exercised public API from reading as dead.
+  // scripts/*.mjs are standalone CLI programs — an operator runs them directly
+  // (`node scripts/setup-github-app.mjs`, `just smoke`), so nothing imports
+  // them either. Same reasoning as the test files.
+  "entry": [
+    "src/index.ts",
+    "src/handlers/*.ts",
+    "test/**/*.test.ts",
+    "scripts/*.mjs",
+  ],
+  // src/image/assets/** (agent.mjs, entrypoint.sh) are runtime MicroVM
+  // assets, not TS library code: they are COPIED VERBATIM into the Docker
+  // build context by the image pipeline (Task 6) and only ever executed
+  // in-VM, never imported by anything in src/. That makes them
+  // structurally "unreachable from any entry point" and not analyzable by
+  // fallow's TS-oriented complexity/health checks (agent.mjs's single
+  // request handler is a plain Node http callback, not something meant to
+  // be decomposed the way library code is) — exclude the whole directory
+  // rather than suppress each finding.
+  "ignorePatterns": ["docs/**", "src/image/assets/**"],
+  // (2026-07-23, flagged for operator ratification) Test files are excluded
+  // from DUPLICATION detection — the same files are already excluded from
+  // complexity via `health.ignore` below. Test setup is intentionally
+  // explicit and repetitive (DAMP over DRY: each test states its own mocks
+  // so a failure is readable in isolation), so a clone detector fights the
+  // grain of good test code — deduping fixtures into shared helpers makes
+  // tests harder to read, not better. src/ keeps full duplication teeth.
+  "duplicates": {
+    "ignore": ["**/*.test.ts", "**/*.test.tsx"],
+  },
+  // (2026-07-23, flagged for operator ratification) `handler` and
+  // `_resetCachesForTesting` are exported by EVERY Lambda handler
+  // (webhook/launcher/janitor/warm-pool) by necessity — `handler` is the
+  // Lambda entrypoint, `_resetCachesForTesting` is each handler's test seam.
+  // fallow's duplicate-export heuristic warns about barrel-re-export
+  // ambiguity, but NOTHING re-exports the handlers (src/index.ts exports only
+  // the construct + public types, never src/handlers/*), so there is no
+  // ambiguity to resolve — a structural false positive that only surfaces
+  // when a single changeset happens to touch two handler files at once.
+  "ignoreExports": [
+    {
+      "file": "src/handlers/*.ts",
+      "exports": ["handler", "_resetCachesForTesting"],
+    },
+  ],
+  // Complexity suppressions (2026-07-18, operator-era Phase 1 merge): janitor.ts
+  // reconcileTable and webhook.ts isValidWorkflowJobPayload exceed cognitive/
+  // cyclomatic thresholds. Both are review-hardened (3 internal passes + external
+  // sign-off); decomposition is scheduled Phase 2 debt (see ledger: constructor/
+  // handler decomposition). REMOVE these entries when the Phase 2 refactor lands.
+  "health": {
+    "ignore": [
+      "src/handlers/janitor.ts",
+      "src/handlers/webhook.ts",
+      // (2026-07-19) Large but review-hardened; Phase 2 decomposition debt
+      // (external review accepted the construct constructor + handleLaunch
+      // size). Remove when those are split into private builders.
+      "src/github-microvm-runners.ts",
+      "src/image/image-pipeline.ts",
+      "src/handlers/launcher.ts",
+      "**/*.test.ts",
+      "**/*.test.tsx",
+      // (2026-07-24) normalizeImageOptions trips the CRAP threshold at 156,
+      // which is a measurement artifact rather than a complexity problem. CRAP
+      // weights complexity by UNCOVERED code, and the pre-commit scan runs
+      // without coverage data, so every function is scored as 0% covered —
+      // this one is exercised by dockerfile-template.test.ts. Passing
+      // --coverage does not help: fallow cannot parse jest's
+      // coverage-final.json (istanbul writes -1 sentinels where fallow expects
+      // an unsigned int). The underlying function is a defaults normalizer
+      // whose 12 cyclomatic count is eight `??` operators plus one validation
+      // loop. Revisit if fallow gains istanbul compatibility.
+      "src/image/dockerfile-template.ts",
+    ],
+  },
+  // (2026-07-18) Task 2's pre-declared runtime deps are all imported by the
+  // handler tasks now — entries pruned per this file's own removal trigger;
+  // the unused-dependency check has full teeth again.
+  "ignoreDependencies": [
+    // aws-cdk (the CLI) is used by the internal dogfood example's `cdk
+    // deploy` (examples/ is gitignored), not imported from src/. (2026-07-19)
+    "aws-cdk",
+    // (2026-07-24) The jsii toolchain and projen's release tooling are CLI
+    // programs invoked by projen tasks — compile, package, docgen, version —
+    // never imported from source. Same shape as aws-cdk above.
+    "jsii",
+    "jsii-diff",
+    "jsii-docgen",
+    "jsii-pacmak",
+    "jsii-rosetta",
+    "commit-and-tag-version",
+    // Wired into .eslintrc.json by projen, not imported.
+    "eslint-config-prettier",
+  ],
+  "usedClassMembers": [
+    "toJson",
+    // (2026-07-18) GithubMicrovmRunnersMetrics methods are PUBLIC CONSTRUCT
+    // API — consumers of the library call them to wire alarms; no internal
+    // src/ caller exists by design. Exercised by the construct test suite.
+    "deadLetterQueueDepth",
+    "orphansReaped",
+    "stuckRunnersReaped",
+    "lifetimeKills",
+    "suspectsCleared",
+    "imageVersionsPruned",
+    "tableRowsCleaned",
+    "stuckLaunchesRecovered",
+    "stuckClaimsRelaunched",
+    "errors",
+    // (2026-07-23) Ready-made alarm factories — same PUBLIC-API-with-no-
+    // internal-caller shape as the metric methods above; consumers call them
+    // to wire alarms, and the construct test suite exercises each.
+    "deadLetterQueueNotEmptyAlarm",
+    "sweepErrorsAlarm",
+    "stuckLaunchesRecoveredAlarm",
+    // (2026-07-24) Per-runner-class metric accessors — the same
+    // PUBLIC-API-with-no-internal-caller shape again. The launcher and
+    // warm-pool handlers emit these ten under a second `SizeClass` dimension;
+    // consumers read them to build dashboards and alarms. Each IS exercised by
+    // the construct test suite, but test files are excluded from this analysis,
+    // so those references cannot clear the finding.
+    "warmHit",
+    "coldBoot",
+    "capacityRejected",
+    "cancelledBeforeLaunch",
+    "warmThrottled",
+    "warmSpinUpMs",
+    "coldSpinUpMs",
+    "poolCurrent",
+    "poolTarget",
+    "poolLaunched",
+    "poolLaunchFailed",
+  ],
+}
