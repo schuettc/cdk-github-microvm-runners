@@ -15,7 +15,21 @@
 // the looser suffix match here.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { openSync, mkdirSync } from 'node:fs';
+import { openSync, mkdirSync, appendFileSync } from 'node:fs';
+
+// Boot timings are written to a FILE, not to stdout. The VM console log group
+// does not capture the agent's early output at all — the startup banner appears
+// zero times in a day of console logs, while a line logged 854 s after boot
+// appeared seven times. A job can read this file; it cannot read what was never
+// captured.
+const TRACE = '/var/log/microvm-runner-boot.log';
+function note(msg) {
+  try {
+    appendFileSync(TRACE, `${Date.now()} ${msg}\n`);
+  } catch {
+    // Tracing must never be able to fail a boot.
+  }
+}
 
 const PORT = 8080;
 const READY_PATH = '/aws/lambda-microvms/runtime/v1/ready';
@@ -83,9 +97,11 @@ function startDockerd() {
 const WARM_PATHS = (process.env.MICROVM_RUNNER_WARM_PATHS ?? '')
   .split(':')
   .filter(Boolean);
-const WARM_MAX_FILES = Number(process.env.MICROVM_RUNNER_WARM_MAX_FILES || 400);
+const WARM_MAX_FILES = Number(
+  process.env.MICROVM_RUNNER_WARM_MAX_FILES || 4000,
+);
 /** Hard wall-clock ceiling. The one bound that holds regardless of disk speed. */
-const WARM_TIMEOUT_S = Number(process.env.MICROVM_RUNNER_WARM_TIMEOUT_S || 20);
+const WARM_TIMEOUT_S = Number(process.env.MICROVM_RUNNER_WARM_TIMEOUT_S || 60);
 
 let warmed = false;
 function warmUp() {
@@ -97,27 +113,33 @@ function warmUp() {
     ' ',
   );
   // `xargs -0 cat` batches many files per process; `cat` per file via -I{}
-  // would spend the budget on process startup instead of on reading.
+  // would spend the budget on process startup instead of on reading. `wc -c`
+  // costs nothing next to the read and makes the volume observable.
   const script =
-    `find ${quoted} -xdev -type f 2>/dev/null | head -n ${WARM_MAX_FILES} ` +
-    `| tr '\\n' '\\0' | xargs -0 -r cat > /dev/null 2>&1; ` +
-    // Executing resolves the interpreter and shared libraries too, which is
-    // most of what a cold `node` actually pays for. Only the two binaries we
-    // ship are executed; configured paths are read, never run.
-    `node --version > /dev/null 2>&1; git --version > /dev/null 2>&1`;
+    `echo "$(date +%s%3N) warm-start" >> ${TRACE}; ` +
+    `B=$(find ${quoted} -xdev -type f 2>/dev/null | head -n ${WARM_MAX_FILES} ` +
+    `| tr '\\n' '\\0' | xargs -0 -r cat 2>/dev/null | wc -c); ` +
+    // Executing resolves the interpreter and shared libraries as well as the
+    // binary. Only the two we ship are executed; configured paths are read.
+    `node --version > /dev/null 2>&1; git --version > /dev/null 2>&1; ` +
+    `echo "$(date +%s%3N) warm-end bytes=$B" >> ${TRACE}`;
   try {
-    const c = spawn(
-      'timeout',
-      [String(WARM_TIMEOUT_S), 'nice', '-n', '19', 'sh', '-c', script],
-      { detached: true, stdio: 'ignore' },
-    );
-    c.on('error', (e) => console.log(`warm-up spawn failed: ${e}`));
+    // NOT nice'd. An earlier version ran at `nice -n 19` on the theory that
+    // warming should yield to runner registration. Decomposing queue latency
+    // showed the opposite: 29 of 41 s is `Runner.Listener` starting inside an
+    // already-RUNNING VM, paging in the very assemblies this reads. Warming is
+    // not competing with that work, it is prefetching for it — sequentially and
+    // in bulk, rather than 4 KB at a time on demand — so it has to run at
+    // normal priority to get ahead.
+    const c = spawn('timeout', [String(WARM_TIMEOUT_S), 'sh', '-c', script], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    c.on('error', (e) => note(`warm-spawn-failed ${e}`));
     c.unref();
-    console.log(
-      `microvm-runner warm-up: started, ${WARM_PATHS.length} paths, ${WARM_TIMEOUT_S}s budget`,
-    );
+    note(`warm-spawned paths=${WARM_PATHS.length} budget=${WARM_TIMEOUT_S}s`);
   } catch (e) {
-    console.log(`warm-up start error: ${e}`);
+    note(`warm-start-error ${e}`);
   }
 }
 
@@ -132,6 +154,7 @@ const server = createServer((req, res) => {
       // the ready handshake, gives it the whole boot→job-assignment window to
       // warm up, so it's reliably ready by the time a job's first docker
       // command runs. Idempotent — safe if /ready is called more than once.
+      note('ready-hook');
       startDockerd();
       // Both of these only spawn a detached child and return, so the ready
       // hook's timeout (readyTimeoutSeconds, 300 by default) is never at risk
@@ -142,6 +165,7 @@ const server = createServer((req, res) => {
       return;
     }
     if (req.url === RUN_PATH) {
+      note('run-hook');
       if (!runnerStarted) {
         try {
           const { jitConfig } = JSON.parse(body || '{}');
@@ -157,6 +181,7 @@ const server = createServer((req, res) => {
             return;
           }
           runnerStarted = true;
+          note('runner-spawn');
           startDockerd(); // MicroVM-safe dockerd for job containers
           const p = spawn(
             'sudo',
@@ -182,4 +207,7 @@ const server = createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => console.log(`microvm-runner agent on ${PORT}`));
+server.listen(PORT, () => {
+  note('agent-listening');
+  console.log(`microvm-runner agent on ${PORT}`);
+});

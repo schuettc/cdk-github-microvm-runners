@@ -273,7 +273,7 @@ describe('warmPaths', () => {
     const rendered = renderDockerfile(normalizeImageOptions({}));
 
     expect(rendered).toContain(
-      'ENV MICROVM_RUNNER_WARM_PATHS="/usr/bin/node:/usr/bin/git"',
+      'ENV MICROVM_RUNNER_WARM_PATHS="/opt/runner:/usr/bin/node:/usr/bin/git"',
     );
   });
 
@@ -311,8 +311,8 @@ describe('warmPaths', () => {
   });
 
   it('hashes identically when the default set is passed explicitly', () => {
-    expect(hashOf({ warmPaths: ['/usr/bin/node', '/usr/bin/git'] })).toBe(
-      hashOf({}),
-    );
+    expect(
+      hashOf({ warmPaths: ['/opt/runner', '/usr/bin/node', '/usr/bin/git'] }),
+    ).toBe(hashOf({}));
   });
 });

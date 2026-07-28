@@ -67,15 +67,23 @@ export interface NormalizedImageOptions {
 }
 
 /**
- * Paths warmed when the consumer names none: the Node runtime that every
- * JavaScript action runs on, and `git`, which `actions/checkout` forks before
- * it does anything else. Between them they account for the checkout cost.
+ * Paths warmed when the consumer names none.
  *
- * `/opt/runner` is deliberately NOT here. Including it read 305 MiB across 400
- * files on a live bench run — hundreds of megabytes of .NET assemblies a job
- * never touches — which is spend without a matching return.
+ * `/opt/runner` is the important one, and an earlier version of this dropped it
+ * on the reasoning that a job never touches those .NET assemblies. That was
+ * wrong about who reads them: decomposing queue latency showed **29 of 41
+ * seconds** is `Runner.Listener` starting inside an already-RUNNING VM, paging
+ * in exactly those files — before any job exists. It is the largest single term
+ * in start-up latency, and unlike job time it is billed while nothing runs.
+ *
+ * `node` and `git` are cheap by comparison and cover the `actions/checkout`
+ * cost, which is what the first version was aimed at.
  */
-export const DEFAULT_WARM_PATHS = ['/usr/bin/node', '/usr/bin/git'];
+export const DEFAULT_WARM_PATHS = [
+  '/opt/runner',
+  '/usr/bin/node',
+  '/usr/bin/git',
+];
 
 /** True when `warmPaths` is exactly the default set, in order. */
 function isDefaultWarmPaths(paths: string[]): boolean {
