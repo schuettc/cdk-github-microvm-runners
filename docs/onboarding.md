@@ -121,3 +121,22 @@ arrives at the ceiling is re-queued and retried until a slot frees.
 [Service quotas](service-quotas.md) covers how the ceiling is sized, how to
 raise it, what to do when it is frozen, and what happens to a launch that waits
 through sustained saturation.
+
+## What to expect on wall time
+
+Moving a job onto a runner set does not, by itself, make it faster. Measured
+across nine production jobs — pytest suites, jest, lint, type-checking — wall
+time was a wash against GitHub-hosted runners: within a minute either way on
+runs of ten to twenty minutes, and marginally slower for short single-threaded
+jobs on the smallest class. A single-threaded step runs on one core wherever it
+runs, and a MicroVM's single-core speed is close to a hosted runner's.
+
+What does change: a job is picked up in seconds rather than waiting on hosted
+queue depth, the VM is billed per second in your own account with no
+hosted-minute metering, and the job runs natively on arm64, which matters when
+its artifacts target arm64.
+
+Speed comes from parallelism. A size preset's vCPUs are over-provisioned
+roughly four-fold — a `GB4` VM comes up with 8 — and a single-process suite
+leaves them idle. A job that splits its work across processes, with
+`pytest -n`, jest workers, or a parallel build, is where those cores pay.

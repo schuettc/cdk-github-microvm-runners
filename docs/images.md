@@ -251,6 +251,13 @@ What that means at deploy time depends on what changed:
 Either way the change arrives through a normal `cdk deploy`, and the janitor
 prunes old image versions as it sweeps.
 
+Let that deploy finish. Interrupting the CLI — Ctrl-C, a dropped connection —
+stops the local process, while CloudFormation carries on server-side with the
+stack in `UPDATE_IN_PROGRESS`, and a job that runs before the image resource
+settles boots the previous image, which looks like the change silently not
+arriving. Wait for the stack to reach `UPDATE_COMPLETE` before re-running the
+jobs that need the new image.
+
 Image builds are silent by default. To see one — why an image failed to build,
 or what a setup command did — turn on `imageLogs: ImageLogs.enabled()`, which
 streams the build output to CloudWatch. See [Logging](logging.md).
