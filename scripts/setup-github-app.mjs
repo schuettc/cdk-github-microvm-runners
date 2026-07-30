@@ -210,7 +210,9 @@ async function resolveWebhookUrl() {
   );
   if (!hit?.OutputValue)
     die(
-      `stack "${STACK}" has no WebhookUrl output — deploy the runner set first, then run this.`,
+      `stack "${STACK}" has no WebhookUrl output. Add one next to the construct:\n` +
+        `  new CfnOutput(stack, 'WebhookUrl', { value: runners.webhookUrl });\n` +
+        `then redeploy and run this again (or pass --webhook-url directly).`,
     );
   return hit.OutputValue;
 }
