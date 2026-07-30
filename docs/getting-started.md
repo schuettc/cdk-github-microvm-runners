@@ -94,8 +94,13 @@ deployed before the App exists.
 cdk deploy
 ```
 
-The stack's `WebhookUrl` output is the address GitHub delivers events to. Its
-`SetupCommand` output is the step 3 command with its values already filled in.
+The stack's `WebhookUrl` output is the address GitHub delivers events to, and
+its `SetupCommand` output is the step 3 command with its values already filled
+in. Both exist because the code above declared them — a stack written without
+those two `CfnOutput` lines deploys fine and has no outputs, and the step 3
+helper, which reads `WebhookUrl` from the stack, then needs the address another
+way: the construct's `webhookUrl` property carries it, and the helper accepts
+it directly as `--webhook-url`.
 
 ## 3. Create the GitHub App
 

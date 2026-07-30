@@ -280,6 +280,9 @@ project.gitignore.exclude(
   // from the repository root's API.md on every build, so the tracked copy of
   // that content stays API.md alone.
   'site/src/content/docs/api.md',
+  // The skills the site serves at /skills/. prepare-agent-artifacts.mjs copies
+  // them from .claude/skills/ on every build; the tracked copy stays there.
+  'site/public/skills/',
   // Build and tool output.
   'dist/',
   'coverage/',
@@ -317,7 +320,18 @@ project.packageTask.prependExec(
 // checked rather than recomputing them. Also keeps `pnpm pack` from traversing
 // node_modules, where the hoisted linker leaves dangling nested .bin symlinks
 // that break it.
-project.package.addField('files', ['lib', '.jsii', '.jsii.tabl.json']);
+project.package.addField('files', ['lib', '.jsii', '.jsii.tabl.json', 'skills']);
+
+// Agent skills ship in the tarball. The skills under .claude/skills/ are
+// authored for any AI agent operating a runner set (diagnosing one, wiring
+// its GitHub App); copying them to a top-level skills/ directory puts them at
+// `node_modules/cdk-github-microvm-runners/skills/<name>/SKILL.md`, versioned
+// in lockstep with the construct they describe. The docs site serves the same
+// files at runnerset.dev/skills/ and links them from llms.txt.
+project.postCompileTask.exec(
+  'rm -rf skills && mkdir -p skills && cp -R .claude/skills/diagnose-runner-set .claude/skills/setup-github-app skills/',
+);
+project.gitignore.exclude('/skills/');
 
 // The handlers are excluded from the jsii tsconfig (excludeTypescript above),
 // so typescript-eslint's project service would find them in no project. Give
