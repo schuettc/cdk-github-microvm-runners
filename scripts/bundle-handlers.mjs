@@ -51,8 +51,11 @@ console.log(`bundled ${HANDLERS.length} handlers -> src/handlers/bundled/`);
 
 // The setup CLI, shipped as the package's `bin`. ESM output because the source
 // is ESM and reads import.meta.url to tell "run as a program" from "imported by
-// a test"; esbuild carries the source's own shebang through, so no banner here
-// (a banner would emit a second one).
+// a test"; esbuild keeps the source's shebang first even with a banner, and the
+// banner is required: the bundled-in CJS deps (@aws-sdk clients) require node
+// builtins, which esbuild's ESM output turns into a stub that throws "Dynamic
+// require of \"node:https\" is not supported" the first time the SDK runs. The
+// createRequire shim gives the bundle a real require for node builtins.
 const cliDir = join(ROOT, 'src', 'cli', 'bundled');
 mkdirSync(cliDir, { recursive: true });
 buildSync({
@@ -66,6 +69,12 @@ buildSync({
   minify: false,
   sourcemap: false,
   logLevel: 'error',
+  banner: {
+    js: [
+      "import { createRequire as __cdkGhmrCreateRequire } from 'node:module';",
+      'const require = __cdkGhmrCreateRequire(import.meta.url);',
+    ].join('\n'),
+  },
 });
 
 // The package as a whole is CommonJS (no `type` field — the jsii/CDK default),
