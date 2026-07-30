@@ -61,6 +61,7 @@ site/node_modules/
 site/dist/
 site/.astro/
 site/src/content/docs/api.md
+site/public/skills/
 dist/
 coverage/
 cdk.out/
@@ -70,5 +71,6 @@ cdk.out/
 .jsii.tabl.json
 .DS_Store
 !/.npmrc
+/skills/
 !/src/handlers/tsconfig.json
 !/.projenrc.ts

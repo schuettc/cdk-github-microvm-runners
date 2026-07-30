@@ -140,6 +140,30 @@ while a job still assumes a tighter role through OIDC for a particular step.
 [Giving a VM a standing identity](#giving-a-vm-a-standing-identity) covers
 `vmExecutionRole`.
 
+## What job code can and cannot do on the VM
+
+A job's steps run as the `runner` user, and job steps run with the
+`no_new_privs` process flag set, so nothing a step starts can gain privileges.
+What that means in practice, on the default image:
+
+- **No `sudo`, and no root.** `sudo` fails with "The no new privileges flag is
+  set", so a job cannot install system packages with `dnf`, start system
+  services, or write outside what the `runner` user owns. Software a job needs
+  on the machine goes into the image at build time —
+  [Runner images](images.md) covers the options, and none of them require
+  anything of the workflow.
+- **No AWS identity**, unless the runner set opts into `vmExecutionRole`: the
+  IMDS serves nothing by default, as the previous section covers.
+- **The network is the runner set's egress** — direct internet by default, or
+  the VPC's routing when a connector is attached, as the next section covers.
+  There is no inbound path to a job.
+- **Nothing survives the job.** The VM is destroyed after its single job, so
+  state a job writes — caches, credentials, tool installs into the home
+  directory — is gone with it.
+
+The boundary is per-VM rather than per-step: every step of the one job the VM
+runs sees the same user, the same identity, and the same network.
+
 ## Networking
 
 By default a runner VM egresses directly to the internet, the same as a Lambda

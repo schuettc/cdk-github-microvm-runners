@@ -263,6 +263,9 @@
         },
         {
           "exec": "npx jsii-rosetta extract --cache-to .jsii.tabl.json"
+        },
+        {
+          "exec": "rm -rf skills && mkdir -p skills && cp -R .claude/skills/diagnose-runner-set .claude/skills/setup-github-app skills/"
         }
       ]
     },
