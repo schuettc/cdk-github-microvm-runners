@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -139,5 +140,49 @@ describe('setup CLI help', () => {
         stdio: 'pipe',
       }),
     ).toThrow(/--org <organization> or --account <login>/);
+  });
+});
+
+describe('bundled setup CLI', () => {
+  const BUNDLE = join(__dirname, '..', 'src', 'cli', 'bundled', 'setup.js');
+
+  beforeAll(() => {
+    // The bundle is a pre-compile artifact; jest can run without it (just
+    // test), so build it here rather than depend on task ordering.
+    if (!existsSync(BUNDLE)) {
+      execFileSync(process.execPath, [
+        join(__dirname, '..', 'scripts', 'bundle-handlers.mjs'),
+      ]);
+    }
+  });
+
+  // v0.1.1 shipped a bundle whose ESM output stubbed out the CJS require the
+  // bundled @aws-sdk clients make for node builtins, so every real invocation
+  // died with `Dynamic require of "node:https" is not supported` before any
+  // AWS call. The suite above never caught it because it runs the unbundled
+  // source. This drives the BUNDLE down the SDK path with credentials blocked:
+  // reaching the credential-provider error proves the require shim works.
+  it('reaches the AWS SDK instead of dying on a dynamic require', () => {
+    const env: Record<string, string> = { AWS_REGION: 'us-east-1' };
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && !key.startsWith('AWS_')) env[key] = value;
+    }
+    env.AWS_EC2_METADATA_DISABLED = 'true';
+    env.AWS_CONFIG_FILE = '/dev/null';
+    env.AWS_SHARED_CREDENTIALS_FILE = '/dev/null';
+
+    let output = '';
+    try {
+      execFileSync(process.execPath, [BUNDLE, '--org', 'no-such-org'], {
+        encoding: 'utf8',
+        stdio: 'pipe',
+        env,
+        timeout: 60_000,
+      });
+    } catch (e: any) {
+      output = `${e.stdout ?? ''}${e.stderr ?? ''}${e.message ?? ''}`;
+    }
+    expect(output).not.toMatch(/Dynamic require/);
+    expect(output).toMatch(/credential/i);
   });
 });
