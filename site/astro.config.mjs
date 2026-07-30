@@ -3,6 +3,7 @@
 // Content comes from the repository's own docs/ directory through the symlink
 // at src/content/docs/guides, so the pages published here are the same files
 // `just docs-examples` type-checks. There is no second copy to drift.
+import { readFileSync } from 'node:fs';
 import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
@@ -58,6 +59,19 @@ export default defineConfig({
       ],
       plugins: [
         starlightLlmsTxt({
+          // /llms.txt is authored, not boilerplate. The generated default said
+          // only "two files exist"; a model fetching it had to choose between
+          // no information and the 235 KB llms-full.txt. The details file is
+          // the model-facing index — a one-paragraph mental model, the
+          // invariants a correct answer cannot contradict, a question → guide
+          // routing table, and the agent skills the site serves at /skills/.
+          // prepare-agent-artifacts.mjs fails the build if its links drift
+          // from docs/ or .claude/skills/, or if a guide is missing from the
+          // routing table.
+          details: readFileSync(
+            new URL('./src/llms-details.md', import.meta.url),
+            'utf8',
+          ),
           // llms-small.txt is the abridged set, for a model with a small
           // context window. Left alone it was 90% the size of llms-full.txt,
           // which makes it pointless: the generated API reference is 65% of

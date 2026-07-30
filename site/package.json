@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/generate-api-page.mjs",
+    "predev": "node scripts/generate-api-page.mjs && node scripts/prepare-agent-artifacts.mjs",
     "dev": "astro dev",
-    "prebuild": "node scripts/generate-api-page.mjs",
+    "prebuild": "node scripts/generate-api-page.mjs && node scripts/prepare-agent-artifacts.mjs",
     "build": "astro build",
     "preview": "astro preview"
   },
