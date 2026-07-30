@@ -36,24 +36,36 @@ const guides = readdirSync(join(repo, 'docs'))
 
 const errors = [];
 
-for (const [, slug] of details.matchAll(/runnerset\.dev\/guides\/([\w-]+)\//g)) {
+for (const [, slug] of details.matchAll(
+  /runnerset\.dev\/guides\/([\w-]+)\//g,
+)) {
   if (!guides.includes(slug)) {
-    errors.push(`llms-details.md links /guides/${slug}/ but docs/${slug}.md does not exist`);
+    errors.push(
+      `llms-details.md links /guides/${slug}/ but docs/${slug}.md does not exist`,
+    );
   }
 }
-for (const [, name] of details.matchAll(/runnerset\.dev\/skills\/([\w-]+)\.md/g)) {
+for (const [, name] of details.matchAll(
+  /runnerset\.dev\/skills\/([\w-]+)\.md/g,
+)) {
   if (!skills.includes(name)) {
-    errors.push(`llms-details.md links /skills/${name}.md but .claude/skills/${name}/ does not exist`);
+    errors.push(
+      `llms-details.md links /skills/${name}.md but .claude/skills/${name}/ does not exist`,
+    );
   }
 }
 for (const slug of guides) {
   if (!details.includes(`runnerset.dev/guides/${slug}/`)) {
-    errors.push(`docs/${slug}.md is not linked from llms-details.md — add it to the routing list`);
+    errors.push(
+      `docs/${slug}.md is not linked from llms-details.md — add it to the routing list`,
+    );
   }
 }
 for (const name of skills) {
   if (!details.includes(`runnerset.dev/skills/${name}.md`)) {
-    errors.push(`skill "${name}" is not linked from llms-details.md — add it to the agent-skills list`);
+    errors.push(
+      `skill "${name}" is not linked from llms-details.md — add it to the agent-skills list`,
+    );
   }
 }
 

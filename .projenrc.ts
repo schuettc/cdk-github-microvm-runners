@@ -320,7 +320,12 @@ project.packageTask.prependExec(
 // checked rather than recomputing them. Also keeps `pnpm pack` from traversing
 // node_modules, where the hoisted linker leaves dangling nested .bin symlinks
 // that break it.
-project.package.addField('files', ['lib', '.jsii', '.jsii.tabl.json', 'skills']);
+project.package.addField('files', [
+  'lib',
+  '.jsii',
+  '.jsii.tabl.json',
+  'skills',
+]);
 
 // Agent skills ship in the tarball. The skills under .claude/skills/ are
 // authored for any AI agent operating a runner set (diagnosing one, wiring
