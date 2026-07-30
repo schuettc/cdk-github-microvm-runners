@@ -152,6 +152,13 @@ What that means in practice, on the default image:
   on the machine goes into the image at build time —
   [Runner images](images.md) covers the options, and none of them require
   anything of the workflow.
+- **Containers work without any of that.** The VM's agent starts the Docker
+  daemon at boot, as root, before the job exists; job steps reach it through
+  the socket, which the `runner` user holds through the `docker` group.
+  `no_new_privs` restricts what a step's own processes can become, not what
+  the already-running daemon does on its behalf.
+  [Runner images](images.md#containers-in-a-job) covers the daemon's settings
+  and their consequences.
 - **No AWS identity**, unless the runner set opts into `vmExecutionRole`: the
   IMDS serves nothing by default, as the previous section covers.
 - **The network is the runner set's egress** — direct internet by default, or

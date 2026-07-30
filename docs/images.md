@@ -23,6 +23,33 @@ environment variables, and the [toolchains](toolchains.md) that `setup-python`
 and `setup-node` resolve. The next section covers how a runner class asks for
 those, and how to supply a Dockerfile of your own instead.
 
+## Containers in a job
+
+A job can build and run containers. The base image carries the Docker engine,
+and the VM's agent starts `dockerd` at boot, as root, before any job arrives.
+Job steps reach it through `/var/run/docker.sock`, which the `runner` user
+holds through the `docker` group — no `sudo` involved, which matters because
+job steps cannot escalate privileges
+([Security](security.md#what-job-code-can-and-cannot-do-on-the-vm)). Do not
+try to start or restart the daemon from a job; it is already running, and the
+job cannot.
+
+The daemon runs with two MicroVM-specific settings, and both are visible from
+a job:
+
+- **`--storage-driver=vfs`.** vfs copies layers in full rather than overlaying
+  them, so building or pulling a large image is slower here than on a machine
+  with overlay2.
+- **`--iptables=false`.** The daemon sets up no NAT, so a container on the
+  default bridge network has **no outbound path**. Run containers that need
+  the network with `--network=host`, and pass `--network=host` to
+  `docker build` when a build step fetches from the network. `docker pull`
+  itself is unaffected — the daemon fetches from the host side.
+
+The daemon's boot log is written to `/var/log/microvm-runner-dockerd.log`,
+readable from any job step. When a `docker` command cannot reach the daemon,
+that file says why.
+
 ## One image per runner class
 
 A runner class's size is part of its image. The size is written onto the image
