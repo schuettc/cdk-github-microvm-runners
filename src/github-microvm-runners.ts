@@ -350,15 +350,28 @@ export interface GithubMicrovmRunnersProps {
   /** How many MicroVM image versions to keep per runner class. The janitor prunes inactive versions past this count. @default 5 */
   readonly keepImageVersions?: number;
   /**
-   * Recover launches that dead-lettered while GitHub Actions was down. Each
-   * janitor sweep re-drives dead-lettered launch messages back onto the job
-   * queue, but only for jobs GitHub still reports as queued; a launch whose job
-   * has since completed or been cancelled is discarded rather than booting a
-   * VM for work nobody is waiting on. Recovery happens once an outage ends,
-   * since GitHub dispatches no jobs while it is down. The janitor counts each
-   * recovered launch under the `stuckLaunchesRecovered` metric, which reports
-   * when `emitMetrics` is on.
-   * @default false
+   * Re-launch jobs that are still waiting for a runner they never got. This is
+   * the floor under an event-driven plane, and it is on by default.
+   *
+   * GitHub announces a job once. If the launch that announcement triggered
+   * doesn't end with the job being served, nothing else ever asks again, and
+   * the job waits for as long as the workflow allows with no error anywhere —
+   * the plane looks healthy because by its own bookkeeping it did its work.
+   * Each janitor sweep closes that hole from two directions: it re-drives
+   * dead-lettered launch messages back onto the job queue, and it re-launches
+   * claims whose VM is gone while the job is still queued. Both check with
+   * GitHub first, so a job that has since completed or been cancelled is
+   * discarded rather than booting a VM for work nobody is waiting on.
+   *
+   * Turn it off only if you want a job that slips through to stay stuck. The
+   * cost of leaving it on is one extra GitHub read per sweep per candidate,
+   * bounded per sweep so it cannot exhaust the installation's rate limit.
+   *
+   * The janitor counts recoveries under the `stuckLaunchesRecovered` and
+   * `stuckClaimsRelaunched` metrics, which report when `emitMetrics` is on. A
+   * count that stays high means launches are failing for some ongoing reason
+   * and the recovery is masking it — alarm on it rather than ignoring it.
+   * @default true
    */
   readonly recoverStuckLaunches?: boolean;
   /**
@@ -1023,7 +1036,7 @@ export class GithubMicrovmRunners extends Construct {
     const webhookReservedConcurrency = props.webhookReservedConcurrency;
     const idleRunnerGraceSeconds = props.idleRunnerGraceSeconds ?? 600;
     const keepImageVersions = props.keepImageVersions ?? 5;
-    const recoverStuckLaunches = props.recoverStuckLaunches ?? false;
+    const recoverStuckLaunches = props.recoverStuckLaunches ?? true;
     // Opt-in, default off: CloudWatch bills custom metrics per metric per
     // month and the launcher/warm-pool metrics multiply by runner class (see
     // the prop's doc). Wired to every handler as `EMIT_METRICS` and consumed

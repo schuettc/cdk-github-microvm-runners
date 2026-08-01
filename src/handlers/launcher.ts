@@ -801,14 +801,14 @@ async function tryWarmPath(params: {
         claimKey: params.claimKey,
         attemptToken: params.attemptToken,
       });
-      console.info(
-        JSON.stringify({
-          msg: 'launcher: warm-path claimed+resumed pool VM and injected JIT',
-          label: params.label,
-          microvmId,
-          runnerName: params.runnerName,
-        }),
-      );
+      logLaunchOutcome({
+        path: 'warm',
+        repo: params.repo,
+        jobId: params.jobId,
+        sizeClass: params.label,
+        microvmId,
+        runnerName: params.runnerName,
+      });
       return { handled: true, throttled: false };
     }
     return { handled: false, throttled: false };
@@ -862,6 +862,42 @@ async function tryWarmPath(params: {
 }
 
 /**
+ * One INFO line per launch that actually produced a runner, keyed by `jobId`.
+ *
+ * The launcher used to log only the paths that DIDN'T launch — skips and
+ * errors — so a job that stalled left no trace and an operator could not
+ * answer "did this plane even try for my job?" from the logs (found live
+ * 2026-08-01, muster thread 146: an 85-minute production stall whose job id
+ * appeared nowhere). `path` distinguishes a warm resume from a cold boot; the
+ * `microvmId`/`runnerName` pair is what makes a job traceable onward into the
+ * VM's own console stream and into GitHub's record of which runner served it.
+ *
+ * Deliberately NOT gated on `emitMetrics`: the EMF envelope carries no job
+ * identity and is off by default, so gating this the same way would reproduce
+ * exactly the blind spot it exists to close.
+ */
+function logLaunchOutcome(params: {
+  path: 'cold' | 'warm';
+  repo: string;
+  jobId: number;
+  sizeClass: string;
+  microvmId: string;
+  runnerName: string;
+}): void {
+  console.log(
+    JSON.stringify({
+      msg: 'launcher: launched',
+      path: params.path,
+      repo: params.repo,
+      jobId: params.jobId,
+      sizeClass: params.sizeClass,
+      microvmId: params.microvmId,
+      runnerName: params.runnerName,
+    }),
+  );
+}
+
+/**
  * True when this job is no longer waiting for a runner, so the launch should
  * be dropped rather than performed.
  *
@@ -876,6 +912,29 @@ async function tryWarmPath(params: {
  *
  * `getWorkflowJob` returns `undefined` on a 404. That is treated as gone: the
  * job was deleted, or its run was, and there is nothing left to run it on.
+ *
+ * A `completed` job is NOT automatically gone, and that is the subtle part.
+ * Runners are a POOL: a JIT runner is not bound to the job whose launch
+ * created it, so GitHub hands a registering runner whichever queued job it
+ * likes among those carrying matching labels (verified live 2026-08-01 — two
+ * jobs in one burst landed on each other's VMs, exactly swapped). So
+ * `completed` covers two opposite situations:
+ *
+ *   - Cancelled while still queued: no runner ever claimed it, nothing was
+ *     spent, and nothing else is waiting on what this launch would supply.
+ *     Skipping is free, and this is the case the guard exists for.
+ *   - Already SERVED by one of this runner set's own runners: a runner WAS
+ *     spent, drawn from the pool, and whichever job lent it is very likely
+ *     still queued. Skipping here drops supply below demand, and the starved
+ *     job then waits forever because nothing reconciles it (found live
+ *     2026-08-01: four jobs in one burst, three VMs, one launch skipped, one
+ *     job queued 85 minutes on a completely healthy plane).
+ *
+ * `conclusion` and `runner_name` tell the two apart, and GitHub's own
+ * signature for the cancelled case — quoted in `handleLaunch` below — is an
+ * EMPTY `runner_name`. A job that actually ran names the runner that ran it,
+ * so a named runner means the pool is now one short and this launch is how it
+ * is repaid.
  */
 async function skipCancelledJob(
   message: LaunchMessage,
@@ -910,10 +969,28 @@ async function skipCancelledJob(
   if (job && job.status !== 'completed') {
     return false;
   }
+  // Completed, but a runner served it: that runner came out of this runner
+  // set's pool, so supply is down one while demand may not be. Launch, and let
+  // the fresh runner be claimed by whichever job is still queued. See the
+  // module doc above for the burst this comes from.
+  if (job?.runnerName) {
+    console.log(
+      JSON.stringify({
+        msg: 'launcher: job already served by a pool runner, launching to restore supply',
+        repo: message.repo,
+        jobId: message.jobId,
+        conclusion: job.conclusion,
+        servedBy: job.runnerName,
+        sizeClass,
+      }),
+    );
+    return false;
+  }
   console.log('launcher: job is no longer queued, skipping the launch', {
     repo: message.repo,
     jobId: message.jobId,
     status: job?.status ?? 'gone',
+    conclusion: job?.conclusion ?? 'gone',
     sizeClass,
   });
   emitLaunchMetrics({
@@ -1208,6 +1285,14 @@ async function handleLaunch(message: LaunchMessage): Promise<void> {
     throw err;
   }
 
+  logLaunchOutcome({
+    path: 'cold',
+    repo: message.repo,
+    jobId: message.jobId,
+    sizeClass,
+    microvmId,
+    runnerName,
+  });
   const coldMetrics: Record<string, number> = {
     ColdBoot: 1,
     ColdSpinUpMs: Date.now() - spinUpStartMs,
@@ -1234,8 +1319,21 @@ async function handleTerminate(message: TerminateMessage): Promise<void> {
     return;
   }
 
-  const item = unmarshall(getRes.Item) as { microvmId: string };
+  const item = unmarshall(getRes.Item) as { microvmId: string; jobId?: number };
   await terminateMicrovm(item.microvmId);
+  // `launchedForJobId` is deliberately named for what it is, and is very often
+  // NOT the job whose `completed` event triggered this terminate: runners are
+  // a pool, so the runner that finished a job usually lives on a VM launched
+  // for some other job. Without this line a VM simply disappears from the
+  // plane with nothing tying it to anything (2026-08-01, muster thread 146).
+  console.log(
+    JSON.stringify({
+      msg: 'launcher: terminated',
+      runnerName: message.runnerName,
+      microvmId: item.microvmId,
+      launchedForJobId: item.jobId,
+    }),
+  );
 
   try {
     await ddbClient().send(

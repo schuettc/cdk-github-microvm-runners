@@ -447,6 +447,36 @@ async function freshGetRunner(
 }
 
 /**
+ * One line per VM this sweep terminates, whatever rule decided it.
+ *
+ * Only `tryLifetimeKill` used to log; the orphan, unregistered-VM and
+ * idle-runner reaps recorded a kill solely in an EMF counter, which reports
+ * nothing at all unless the runner set opted into `emitMetrics`. A plane with
+ * metrics off therefore reaped VMs completely silently — during the 2026-08-01
+ * stall (muster thread 146) the janitor emitted no output whatsoever across 90
+ * minutes while VMs were created and destroyed underneath it, and "did the
+ * janitor take my VM?" could not be answered at all.
+ *
+ * `rule` names which reap fired, since the operator's next question after
+ * "something killed my VM" is always "which rule, and was it right?".
+ */
+function logReap(params: {
+  rule: 'orphan' | 'unregistered' | 'idle';
+  vm: RunnerSetVm;
+  row: RunnerRow | undefined;
+}): void {
+  console.log(
+    JSON.stringify({
+      msg: 'janitor: reaped',
+      rule: params.rule,
+      microvmId: params.vm.microvmId,
+      runnerName: params.row?.runnerName,
+      launchedForJobId: params.row?.jobId,
+    }),
+  );
+}
+
+/**
  * Rule 4 — lifetime backstop: applies to every RUNNING VM regardless of
  * runner/row state. The platform's own `maximumDurationInSeconds` cap (job
  * duration + 300s grace, set at launch) "should" have already fired by this
@@ -549,6 +579,7 @@ async function reconcileOrphanVm(
       return;
     }
     await terminateMicrovm(vm.microvmId);
+    logReap({ rule: 'orphan', vm, row });
     await deleteRow(ctx.tableName, row.runnerName);
     ctx.metrics.orphansReaped += 1;
   }
@@ -605,6 +636,7 @@ async function handleAbsentFromList(
     await deleteRunner(target, row.runnerId);
   }
   await terminateMicrovm(vm.microvmId);
+  logReap({ rule: 'unregistered', vm, row });
   await deleteRow(ctx.tableName, row.runnerName);
   ctx.metrics.orphansReaped += 1;
 }
@@ -667,6 +699,7 @@ async function handleListedIdle(
   }
   await deleteRunner(target, fresh.id);
   await terminateMicrovm(vm.microvmId);
+  logReap({ rule: 'idle', vm, row });
   await deleteRow(ctx.tableName, row.runnerName);
   ctx.metrics.stuckRunnersReaped += 1;
 }

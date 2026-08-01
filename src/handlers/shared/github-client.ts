@@ -478,17 +478,34 @@ export async function deleteRunner(
 
 /**
  * Fetch a workflow job's status (`queued` | `in_progress` | `completed` | …),
- * its requested runner `labels`, and its `runId`, or `undefined` if the job no
- * longer exists (404). The DLQ sweep reads only `.status`; the claim-row
- * reconciler also reads `labels`/`runId` to rebuild a launch message without
- * storing them on the claim row.
+ * its `conclusion` and the `runnerName` that served it, its requested runner
+ * `labels`, and its `runId`, or `undefined` if the job no longer exists (404).
+ * The DLQ sweep reads only `.status`; the claim-row reconciler also reads
+ * `labels`/`runId` to rebuild a launch message without storing them on the
+ * claim row.
+ *
+ * `conclusion`/`runnerName` exist for the launcher's pre-launch guard
+ * (`skipCancelledJob`), which has to tell two very different `completed` jobs
+ * apart: one cancelled while still queued, which consumed no runner, and one
+ * that actually RAN on a runner drawn from this runner set's pool. `status`
+ * alone reports both as `completed`. See the guard for why the difference
+ * decides whether another job starves.
  */
 export async function getWorkflowJob(
   target: ScopeTarget,
   owner: string,
   repo: string,
   jobId: number,
-): Promise<{ status: string; labels: string[]; runId: number } | undefined> {
+): Promise<
+  | {
+      status: string;
+      conclusion: string | undefined;
+      runnerName: string | undefined;
+      labels: string[];
+      runId: number;
+    }
+  | undefined
+> {
   const res = await authedFetch(
     target,
     `/repos/${owner}/${repo}/actions/jobs/${jobId}`,
@@ -499,11 +516,18 @@ export async function getWorkflowJob(
   await assertOk(res);
   const body = (await res.json()) as {
     status: string;
+    conclusion?: string | null;
+    runner_name?: string | null;
     labels?: string[];
     run_id?: number;
   };
   return {
     status: body.status,
+    conclusion: body.conclusion ?? undefined,
+    // GitHub sends an EMPTY STRING (not null) for a job no runner ever
+    // claimed, so `|| undefined` — `??` would keep `''` and read as "a runner
+    // served this".
+    runnerName: body.runner_name || undefined,
     labels: body.labels ?? [],
     runId: body.run_id ?? 0,
   };

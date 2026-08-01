@@ -116,8 +116,11 @@ drain the queue. It reads an SQS metric, so it works with or without
 means a sweep finished with part of the runner set's state unreconciled.
 
 `stuckLaunchesRecoveredAlarm` watches `stuckLaunchesRecovered`. The runner set
-property `recoverStuckLaunches`, off by default, is what drives that counter, so
-it reads zero while that is off.
+property `recoverStuckLaunches` drives that counter and is on by default, so a
+non-zero value is real: recovery is working, and something upstream is losing
+launches often enough to need it. Treat a persistently high count as a signal to
+find that cause, not as a healthy steady state. Setting the property to false
+silences the counter along with the recovery itself.
 
 Those two read metrics the handlers emit, so they require `emitMetrics: true`
 and throw at synth without it.

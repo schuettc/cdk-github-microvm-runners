@@ -855,6 +855,34 @@ describe('rule 6: orphan VM (no table row) lifecycle', () => {
     );
   });
 
+  it('logs every VM it reaps', async () => {
+    // Three of the janitor's four terminate paths logged NOTHING, recording a
+    // kill only in an EMF counter that reports nothing unless `emitMetrics` is
+    // on. On a plane with metrics off that makes a reap completely invisible:
+    // in the 2026-08-01 incident (muster thread 146) the janitor produced not
+    // one log line across 90 minutes while VMs came and went underneath it.
+    // Terminating a VM is the most consequential thing this handler does; it
+    // must always say so.
+    setRunnerSetVms([{ microvmId: 'mvm-orphan' }]);
+    setTableRows([
+      orphanRow('mvm-orphan', isoMinusSeconds(INTERVAL_SECONDS + 1)),
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const line = logSpy.mock.calls
+      .map(([first]) => (typeof first === 'string' ? first : ''))
+      .find((l) => l.includes('janitor: reaped'));
+    expect(line).toBeDefined();
+    const parsed = JSON.parse(line as string);
+    expect(parsed.microvmId).toBe('mvm-orphan');
+    expect(parsed.rule).toBe('orphan');
+    logSpy.mockRestore();
+  });
+
   it('pre-kill freshness: an interval-old orphan row whose sweep-start scan snapshot showed no competing row, but a FRESH pre-kill consistent scan now reveals a legit row for the same microvmId — no terminate, orphan row deleted', async () => {
     setRunnerSetVms([{ microvmId: 'mvm-shared' }]);
     // Sweep-start scan snapshot: only the interval-old orphan row (no legit
