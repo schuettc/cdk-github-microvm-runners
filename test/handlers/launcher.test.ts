@@ -719,6 +719,30 @@ describe('launch: per-launch metrics', () => {
     return JSON.parse(lines[0]) as Record<string, unknown>;
   }
 
+  it('logs a successful warm launch against its job id', async () => {
+    // The warm path already logged a line, but keyed by pool LABEL and
+    // microvmId only — no jobId — so a warm-served job was as untraceable as
+    // a cold one. Same line, same shape, both paths.
+    setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 3 }) });
+    warmSuspendedListing();
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    const event = batchEvent([sqsRecord('m1', launchMessage())]);
+
+    await handler(event, {} as never, undefined as never);
+
+    const launched = logSpy.mock.calls
+      .map(([first]) => (typeof first === 'string' ? first : ''))
+      .find((line) => line.includes('launcher: launched'));
+    expect(launched).toBeDefined();
+    const parsed = JSON.parse(launched as string);
+    expect(parsed.jobId).toBe(1001);
+    expect(parsed.path).toBe('warm');
+    expect(parsed.sizeClass).toBe('microvm');
+    logSpy.mockRestore();
+  });
+
   it('(a) warm-hit launch emits WarmHit:1 with the matched SizeClass and a numeric WarmSpinUpMs (no ColdSpinUpMs)', async () => {
     setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 3 }) });
     warmSuspendedListing();
@@ -827,6 +851,11 @@ describe('launch: per-launch metrics', () => {
     // minutes later.
     getWorkflowJobMock.mockResolvedValue({
       status: 'completed',
+      // The signature of the case: cancelled, and no runner ever claimed it.
+      // GitHub sends runner_name as an empty string here, which the client
+      // maps to undefined.
+      conclusion: 'cancelled',
+      runnerName: undefined,
       labels: ['self-hosted', 'microvm'],
       runId: 1,
     });
@@ -847,6 +876,61 @@ describe('launch: per-launch metrics', () => {
     expect(parsed.CancelledBeforeLaunch).toBe(1);
     expect(parsed.SizeClass).toBe('microvm');
     logSpy.mockRestore();
+  });
+
+  it('logs a successful cold launch against its job id', async () => {
+    // Found live 2026-08-01 (muster thread 146): the launcher logged SKIPS but
+    // never LAUNCHES, so "did this plane even try for my job?" was
+    // unanswerable — a stalled job left no trace anywhere and the incident
+    // took an hour to diagnose instead of a grep. One line per launch, keyed
+    // by jobId, is the whole fix.
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    const event = batchEvent([sqsRecord('m1', launchMessage())]);
+
+    await handler(event, {} as never, undefined as never);
+
+    const launched = logSpy.mock.calls
+      .map(([first]) => (typeof first === 'string' ? first : ''))
+      .find((line) => line.includes('launcher: launched'));
+    expect(launched).toBeDefined();
+    const parsed = JSON.parse(launched as string);
+    expect(parsed.jobId).toBe(1001);
+    expect(parsed.repo).toBe('acme/widgets');
+    expect(parsed.sizeClass).toBe('microvm');
+    expect(parsed.path).toBe('cold');
+    expect(parsed.microvmId).toBeDefined();
+    expect(parsed.runnerName).toBeDefined();
+    logSpy.mockRestore();
+  });
+
+  it('a job already served by one of our own runners still launches', async () => {
+    // The starvation case, found live 2026-08-01 (muster thread 146). Runners
+    // are a POOL: a JIT runner is not bound to the job that caused its launch,
+    // so GitHub hands a registering runner whichever queued job it likes among
+    // those with matching labels. When it does that, this job reads back as
+    // `completed` — but a runner from this runner set was spent to get it
+    // there, and some OTHER job is still queued waiting for the runner this
+    // launch would have supplied. Skipping here drops supply below demand and
+    // that other job waits forever, with nothing to reconcile it.
+    //
+    // Told apart from a genuine cancellation by `conclusion` and
+    // `runner_name`: a job that actually RAN concludes success/failure and
+    // names the runner that served it.
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'completed',
+      conclusion: 'success',
+      runnerName: 'microvm-runner-abcd1234-79b98872',
+      labels: ['self-hosted', 'microvm'],
+      runId: 1,
+    });
+    const event = batchEvent([sqsRecord('m1', launchMessage())]);
+
+    const res = await handler(event, {} as never, undefined as never);
+
+    expect(res).toEqual({ batchItemFailures: [] });
+    expect(mvmMock.commandCalls(RunMicrovmCommand)).toHaveLength(1);
   });
 
   it('a job GitHub no longer knows about (404) is not launched', async () => {
@@ -1464,6 +1548,43 @@ describe('terminate', () => {
     expect(delCalls[0].args[0].input.Key?.runnerName?.S).toBe(
       'runners-x-abc12345',
     );
+  });
+
+  it('logs a terminate against the job the terminated VM was launched for', async () => {
+    // Terminate was silent on success, and because runners are a pool the VM
+    // it kills is often NOT the one launched for the completing job. In the
+    // 2026-08-01 incident that made a VM vanish 3 seconds after an unrelated
+    // job finished, with nothing in any log connecting the two. The row
+    // already carries the jobId — log it.
+    ddbMock.on(GetItemCommand).resolves({
+      Item: marshall({
+        runnerName: 'runners-x-abc12345',
+        microvmId: 'mvm-999',
+        repo: 'acme/widgets',
+        jobId: 1001,
+        launchedAt: '2026-07-18T11:00:00.000Z',
+        expiresAt: 1234567890,
+      }),
+    });
+    mvmMock.on(TerminateMicrovmCommand).resolves({});
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    const event = batchEvent([
+      sqsRecord('m1', terminateMessage('runners-x-abc12345')),
+    ]);
+
+    await handler(event, {} as never, undefined as never);
+
+    const line = logSpy.mock.calls
+      .map(([first]) => (typeof first === 'string' ? first : ''))
+      .find((l) => l.includes('launcher: terminated'));
+    expect(line).toBeDefined();
+    const parsed = JSON.parse(line as string);
+    expect(parsed.runnerName).toBe('runners-x-abc12345');
+    expect(parsed.microvmId).toBe('mvm-999');
+    expect(parsed.launchedForJobId).toBe(1001);
+    logSpy.mockRestore();
   });
 
   it('resolves successfully for an unknown runnerName without calling TerminateMicrovm', async () => {

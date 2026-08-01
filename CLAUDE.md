@@ -113,3 +113,11 @@ debugging something that looks broken.
   before it launches.
 - `ListMicrovms` retains terminated VMs for about a day, and the launcher pages
   the whole account list on every launch.
+- A JIT runner is **not bound to the job that launched it**. The launcher
+  registers a runner carrying the job's labels, and GitHub then hands it
+  whichever queued job it likes among those with matching labels — verified live
+  by queueing two jobs and watching them land on each other's VMs, exactly
+  swapped. Runners are a **pool**, so per-job reasoning is wrong wherever supply
+  is counted: a launch skipped because "its" job is already done removes a runner
+  the pool may still owe to a job that is still queued. Terminate is safe here
+  because it is keyed by runner name, which follows the runner to the right VM.

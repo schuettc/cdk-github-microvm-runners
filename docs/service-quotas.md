@@ -44,9 +44,9 @@ ServiceQuotaExceededException: The base maximum allocated memory limit
 has been reached for this account.
 ```
 
-The launcher's message stays on the queue and is retried, and with the
-`recoverStuckLaunches` option enabled the janitor re-drives anything that
-dead-letters. The job serializes, waiting until a running VM frees enough
+The launcher's message stays on the queue and is retried, and the janitor
+re-drives anything that dead-letters. The job serializes, waiting until a
+running VM frees enough
 memory. What clears it is more concurrent capacity: a higher quota, or smaller
 VMs, so more fit in the same memory budget.
 
@@ -94,11 +94,11 @@ each after the 180s visibility timeout, will eventually dead-letter — roughly 
 
 Three things matter for a runner set expected to run sustained at capacity.
 Raising `maxReceiveCount` gives genuine saturation a longer queue wait before a
-launch dead-letters. Enabling `recoverStuckLaunches` re-drives any launch that
-does dead-letter during a long saturation or a GitHub outage, once its job is
-launchable again; with it off, a dead-lettered launch waits in the dead-letter
-queue until you drain it yourself. The third is capacity itself, which under a
-fixed memory quota means moving to a smaller size class.
+launch dead-letters. `recoverStuckLaunches`, on by default, re-drives any launch
+that does dead-letter during a long saturation or a GitHub outage, once its job
+is launchable again; turn it off and a dead-lettered launch waits in the
+dead-letter queue until you drain it yourself. The third is capacity itself,
+which under a fixed memory quota means moving to a smaller size class.
 
 ## Checking your quotas
 

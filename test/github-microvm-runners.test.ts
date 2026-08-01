@@ -254,11 +254,35 @@ describe('GithubMicrovmRunners: minimal instantiation', () => {
     });
   });
 
-  it('recoverStuckLaunches defaults off: RECOVER_STUCK_LAUNCHES=false and no DLQ-consume grant on the janitor', () => {
+  it('recoverStuckLaunches defaults ON: a launch that never served its job is recovered without the operator opting in', () => {
+    // Shipped off, which made it useless exactly when it was needed. A
+    // production stall on 2026-08-01 (muster thread 146) matched this
+    // reconciler's conditions precisely — committed claim, VM terminated, job
+    // still queued — and every sweep for 85 minutes would have recovered it,
+    // but the flag was false. There is no floor under an event-driven plane
+    // unless the floor is on by default.
+    const stack = newStack();
+    mkRunners(stack, 'RunnersDefaultRecover', {
+      github: patAuth(stack, 'DefRec'),
+      scope: RunnerScope.org('o'),
+    });
+    const t = Template.fromStack(stack);
+    const janitorEnv = t.findResources('AWS::Lambda::Function', {
+      Properties: {
+        Environment: {
+          Variables: Match.objectLike({ RECOVER_STUCK_LAUNCHES: 'true' }),
+        },
+      },
+    });
+    expect(Object.keys(janitorEnv).length).toBe(1);
+  });
+
+  it('recoverStuckLaunches: false still opts out — RECOVER_STUCK_LAUNCHES=false and no DLQ-consume grant on the janitor', () => {
     const stack = newStack();
     mkRunners(stack, 'RunnersNoRecover', {
       github: patAuth(stack, 'NoRec'),
       scope: RunnerScope.org('o'),
+      recoverStuckLaunches: false,
     });
     const t = Template.fromStack(stack);
     const janitorEnv = t.findResources('AWS::Lambda::Function', {

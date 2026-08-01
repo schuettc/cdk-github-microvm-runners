@@ -16,6 +16,7 @@ import {
   generateJitConfig,
   getInstallationToken,
   getRunner,
+  getWorkflowJob,
   listRunners,
   RetryableError,
   type ScopeTarget,
@@ -631,6 +632,92 @@ describe('getRunner', () => {
       .reply(500, { message: 'boom' });
 
     await expect(getRunner({ org: 'acme' }, 500)).rejects.toThrow();
+  });
+});
+
+describe('getWorkflowJob', () => {
+  it('reports the runner that served a completed job', async () => {
+    // The launcher's pre-launch guard cannot tell a cancelled-while-queued job
+    // from one a pool runner already ran without these two fields — `status`
+    // is `completed` either way.
+    setPatEnv();
+    pool
+      .intercept({
+        path: '/repos/acme/widgets/actions/jobs/7',
+        method: 'GET',
+      })
+      .reply(200, {
+        status: 'completed',
+        conclusion: 'success',
+        runner_name: 'microvm-runner-abcd1234-79b98872',
+        labels: ['self-hosted', 'microvm'],
+        run_id: 99,
+      });
+
+    const job = await getWorkflowJob(
+      { owner: 'acme', repo: 'widgets' },
+      'acme',
+      'widgets',
+      7,
+    );
+
+    expect(job).toEqual({
+      status: 'completed',
+      conclusion: 'success',
+      runnerName: 'microvm-runner-abcd1234-79b98872',
+      labels: ['self-hosted', 'microvm'],
+      runId: 99,
+    });
+  });
+
+  it('maps the empty runner_name of a cancelled-while-queued job to undefined', async () => {
+    // GitHub sends an EMPTY STRING, not null, for a job no runner ever
+    // claimed. `??` would preserve `''`, which is truthy-adjacent enough to be
+    // dangerous: the guard tests `job.runnerName` for "a runner served this",
+    // and a `''` that survived would be falsy — but any later `!== undefined`
+    // check would read it as a real runner. Pin the mapping.
+    setPatEnv();
+    pool
+      .intercept({
+        path: '/repos/acme/widgets/actions/jobs/8',
+        method: 'GET',
+      })
+      .reply(200, {
+        status: 'completed',
+        conclusion: 'cancelled',
+        runner_name: '',
+        labels: ['self-hosted', 'microvm'],
+        run_id: 99,
+      });
+
+    const job = await getWorkflowJob(
+      { owner: 'acme', repo: 'widgets' },
+      'acme',
+      'widgets',
+      8,
+    );
+
+    expect(job?.runnerName).toBeUndefined();
+    expect(job?.conclusion).toBe('cancelled');
+  });
+
+  it('returns undefined on 404', async () => {
+    setPatEnv();
+    pool
+      .intercept({
+        path: '/repos/acme/widgets/actions/jobs/404',
+        method: 'GET',
+      })
+      .reply(404, { message: 'Not Found' });
+
+    await expect(
+      getWorkflowJob(
+        { owner: 'acme', repo: 'widgets' },
+        'acme',
+        'widgets',
+        404,
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 
