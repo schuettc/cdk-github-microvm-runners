@@ -77,9 +77,11 @@ flowchart TD
 
 6. The **janitor Lambda** runs on a schedule and reconciles the runner set. It
    terminates VMs that GitHub has lost track of or that never received a job,
-   prunes old image versions, removes stale table rows, and, when
-   `recoverStuckLaunches` is enabled, re-drives launches that dead-lettered
-   during a GitHub outage.
+   prunes old image versions, removes stale table rows, and re-launches jobs
+   still queued that never got the runner they were promised. That last duty is
+   the floor under the whole plane: GitHub announces a job once, so without it a
+   launch that goes astray leaves the job waiting with no error anywhere. It is
+   on unless you set `recoverStuckLaunches` to false.
 
 A runner class that sets `warmPoolSize` adds a seventh piece: the **warm-pool
 Lambda**, on its own schedule, which keeps that class's pool at its target by
