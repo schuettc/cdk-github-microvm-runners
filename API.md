@@ -2823,8 +2823,17 @@ Alarm on janitor sweep errors, the per-item failures a sweep isolates and contin
 
 A value that stays above zero means the runner set is
 failing to reconcile — VMs left running, runners left unreaped — even
-though each sweep completes. It fires on one error over a single 5-minute
-period; pass `RunnerAlarmOptions` to change that.
+though each sweep completes. It fires on one error in each of three
+consecutive 5-minute periods; pass `RunnerAlarmOptions` to change that.
+
+The three periods are the point. A single sweep error is usually a
+transient fault the next sweep sails past — a GitHub API call that lost
+its connection, a throttled describe — and the sweep is convergent, so
+the work is retried five minutes later either way. Alarming on one such
+blip pages an operator for something already fixed by the time they
+read it. A genuine reconciliation failure (expired credentials, a broken
+table, a revoked App installation) fails every sweep, so it still
+announces itself within fifteen minutes.
 
 Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
 without it.
