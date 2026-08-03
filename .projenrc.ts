@@ -268,6 +268,11 @@ project.gitignore.exclude(
   'docs/designs/',
   'docs/blog/',
   '.superpowers/',
+  // Git worktrees. Every line of work gets its own worktree at
+  // <repo-root>/.worktrees/<branch> (see CLAUDE.md); `claude -w` uses
+  // .claude/worktrees/. Neither is ever committed.
+  '.worktrees/',
+  '.claude/worktrees/',
   // Local-only deploy rigs (bench, dogfood, smoke tests) that carry account
   // detail and are not part of the published package.
   'examples/',

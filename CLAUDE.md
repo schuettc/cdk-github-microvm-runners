@@ -121,3 +121,8 @@ debugging something that looks broken.
   is counted: a launch skipped because "its" job is already done removes a runner
   the pool may still owe to a job that is still queued. Terminate is safe here
   because it is keyed by runner name, which follows the runner to the right VM.
+
+## Worktrees
+
+Isolate each line of work in its own worktree at `<repo-root>/.worktrees/<branch>`
+— see the `worktree-isolation` skill.
