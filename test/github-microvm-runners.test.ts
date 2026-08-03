@@ -2230,6 +2230,35 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
     expect(evalPeriods).toContain(3); // stuck-launch default
   });
 
+  it('sweepErrorsAlarm defaults to 3 evaluation periods, so one isolated sweep error cannot page', () => {
+    // The metric is only actionable when it persists: the sweep is
+    // convergent, so a one-off failure is retried five minutes later
+    // regardless, and paging for it wakes someone for work already done.
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.sweepErrorsAlarm(stack);
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Threshold: 1,
+      EvaluationPeriods: 3,
+    });
+  });
+
+  it('sweepErrorsAlarm still honours an explicit evaluationPeriods override', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.sweepErrorsAlarm(stack, { evaluationPeriods: 1 });
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Threshold: 1,
+      EvaluationPeriods: 1,
+    });
+  });
+
   it('alarm options override threshold / evaluationPeriods', () => {
     const stack = newStack();
     const runners = mkRunners(stack, 'Runners', minimalProps(stack));

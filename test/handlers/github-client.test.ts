@@ -784,3 +784,81 @@ describe('rate-limit hygiene', () => {
     );
   });
 });
+
+describe('githubFetch — transient network-failure retry', () => {
+  /**
+   * The real incident this covers: a janitor sweep called `getWorkflowJob`
+   * while reconciling a committed claim, undici raised
+   * `TypeError: fetch failed` (a connection-level failure — DNS/TLS/socket —
+   * not an HTTP status), and the sweep counted an isolated error. One blip
+   * should not surface as a sweep error when a retry a few hundred ms later
+   * would have succeeded.
+   */
+  const networkFailure = (): Error =>
+    Object.assign(new TypeError('fetch failed'), {
+      cause: new Error('ECONNRESET'),
+    });
+
+  it('retries a GET past a transient failure and returns the eventual success', async () => {
+    setPatEnv();
+    pool
+      .intercept({ path: '/repos/acme/widgets/actions/jobs/7', method: 'GET' })
+      .replyWithError(networkFailure());
+    pool
+      .intercept({ path: '/repos/acme/widgets/actions/jobs/7', method: 'GET' })
+      .reply(200, { status: 'completed', labels: ['microvm'], run_id: 99 });
+
+    const job = await getWorkflowJob(
+      { owner: 'acme', repo: 'widgets' },
+      'acme',
+      'widgets',
+      7,
+    );
+
+    expect(job?.status).toBe('completed');
+    expect(job?.runId).toBe(99);
+    mockAgent.assertNoPendingInterceptors();
+  });
+
+  it('gives up and rethrows once the retry budget is spent', async () => {
+    setPatEnv();
+    pool
+      .intercept({ path: '/repos/acme/widgets/actions/jobs/7', method: 'GET' })
+      .replyWithError(networkFailure())
+      .times(10);
+
+    await expect(
+      getWorkflowJob({ owner: 'acme', repo: 'widgets' }, 'acme', 'widgets', 7),
+    ).rejects.toThrow(/fetch failed/);
+  });
+
+  it('does not retry a POST, whose replay could double-create a runner', async () => {
+    // `generateJitConfig` registers a runner. A connection-level failure does
+    // not prove the request never landed, so replaying it risks a second
+    // registration — a leaked runner is worse than one isolated sweep error.
+    setPatEnv();
+    pool
+      .intercept({
+        path: '/orgs/acme/actions/runners/generate-jitconfig',
+        method: 'POST',
+      })
+      .replyWithError(networkFailure());
+    pool
+      .intercept({
+        path: '/orgs/acme/actions/runners/generate-jitconfig',
+        method: 'POST',
+      })
+      .reply(201, { encoded_jit_config: 'never-reached' });
+
+    await expect(
+      generateJitConfig({
+        target: { org: 'acme' },
+        runnerName: 'microvm-runner-abcd1234-79b98872',
+        labels: ['microvm'],
+      }),
+    ).rejects.toThrow(/fetch failed/);
+
+    // The success interceptor is still pending: only one attempt was made.
+    expect(mockAgent.pendingInterceptors()).toHaveLength(1);
+  });
+});

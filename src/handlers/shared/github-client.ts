@@ -271,6 +271,84 @@ async function githubFetch(
   return res;
 }
 
+/**
+ * Total attempts for a request eligible for replay (the initial call plus two).
+ * Deliberately small: the janitor sweeps on a 5-minute clock and the launcher
+ * runs against an SQS visibility timeout, so a slow failure is worse than a
+ * fast one — a fault that outlasts ~300ms of retry is not a blip.
+ */
+const REPLAY_MAX_ATTEMPTS = 3;
+
+/** Base backoff between replays; doubles each time (100ms, then 200ms). */
+const REPLAY_BASE_MS = 100;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * How many times a request using `method` may be issued in total.
+ *
+ * Only reads get more than one. A transport fault does not prove the request
+ * never reached GitHub — it can also break while the response is being read,
+ * after the server has already acted — so replaying a POST could double-create
+ * (a second registered runner from `generateJitConfig`) and replaying a DELETE
+ * could race a re-registration. The mutating callers are convergent anyway:
+ * the janitor re-reaps on its next sweep, and the launcher's SQS message
+ * redrives.
+ */
+function replayBudgetFor(method: string | undefined): number {
+  return (method ?? 'GET') === 'GET' ? REPLAY_MAX_ATTEMPTS : 1;
+}
+
+/**
+ * Whether a failed attempt should be replayed.
+ *
+ * `fetch` rejects, rather than resolving with a status, only for transport
+ * faults — DNS, TLS, socket resets — and the spec words those as a `TypeError`
+ * (undici's message is `fetch failed`). Everything else out of
+ * {@link githubFetch} is a considered outcome that replaying would only make
+ * worse: a `RetryableError` is GitHub's own rate-limit signal, whose whole
+ * point is to back off through the caller, and the non-relative-path guard in
+ * {@link assertRelativeGithubPath} throws a plain `Error` for a caller bug
+ * that will fail identically every time.
+ */
+function shouldReplay(
+  err: unknown,
+  attempt: number,
+  maxAttempts: number,
+): boolean {
+  return attempt < maxAttempts && err instanceof TypeError;
+}
+
+/**
+ * {@link githubFetch}, with a transport fault on a read replayed a couple of
+ * times behind a doubling backoff.
+ *
+ * Worth the complexity because these faults are transient often enough to be
+ * noise rather than signal: one cost the janitor a counted sweep error — and
+ * so an operator page — for a connection the very next sweep made without
+ * trouble.
+ */
+async function githubFetchWithReplay(
+  path: string,
+  opts: RawFetchOpts,
+): Promise<Response> {
+  const maxAttempts = replayBudgetFor(opts.method);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await githubFetch(path, opts);
+    } catch (err) {
+      if (!shouldReplay(err, attempt, maxAttempts)) {
+        throw err;
+      }
+      await sleep(REPLAY_BASE_MS * 2 ** (attempt - 1));
+    }
+  }
+}
+
 async function assertOk(res: Response): Promise<void> {
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -293,7 +371,7 @@ async function listAllInstallations(
     account: { login: string } | null;
   }> = [];
   for (let page = 1; ; page += 1) {
-    const res = await githubFetch(
+    const res = await githubFetchWithReplay(
       `/app/installations?per_page=${pageSize}&page=${page}`,
       { bearerToken: jwt },
     );
@@ -374,7 +452,7 @@ export async function getInstallationToken(
 
   const jwt = await buildAppJwt();
   const installationId = await getInstallationId(jwt, ownerLogin);
-  const res = await githubFetch(
+  const res = await githubFetchWithReplay(
     `/app/installations/${installationId}/access_tokens`,
     {
       method: 'POST',
@@ -396,7 +474,7 @@ async function authedFetch(
   opts: { method?: string; body?: unknown } = {},
 ): Promise<Response> {
   const bearerToken = await getInstallationToken(target);
-  return githubFetch(path, { ...opts, bearerToken });
+  return githubFetchWithReplay(path, { ...opts, bearerToken });
 }
 
 function runnersBasePath(target: ScopeTarget): string {

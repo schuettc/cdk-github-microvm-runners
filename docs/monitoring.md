@@ -113,7 +113,13 @@ drain the queue. It reads an SQS metric, so it works with or without
 `emitMetrics`.
 
 `sweepErrorsAlarm` watches the janitor's `errors` counter. A non-zero value
-means a sweep finished with part of the runner set's state unreconciled.
+means a sweep finished with part of the runner set's state unreconciled. It
+fires only when three consecutive sweeps report an error, because one sweep
+error on its own is usually transient — a GitHub API call that lost its
+connection, a throttled describe — and the sweep is convergent, so the work is
+retried five minutes later regardless. A real reconciliation failure (expired
+credentials, a revoked App installation, a broken table) fails every sweep and
+still announces itself within fifteen minutes.
 
 `stuckLaunchesRecoveredAlarm` watches `stuckLaunchesRecovered`. The runner set
 property `recoverStuckLaunches` drives that counter and is on by default, so a
@@ -127,8 +133,10 @@ and throw at synth without it.
 
 Each takes an optional `RunnerAlarmOptions { threshold?, evaluationPeriods?,
 period? }`. The defaults are `threshold: 1`, `evaluationPeriods: 1` — 3 for the
-stuck-launch alarm — and `period: Duration.minutes(5)`, compared with `>=`, with
-missing data treated as not breaching. Pass any of the three to change it:
+sweep-errors and stuck-launch alarms, both of which watch signals that only
+mean something when they persist — and `period: Duration.minutes(5)`, compared
+with `>=`, with missing data treated as not breaching. Pass any of the three to
+change it:
 
 ```ts
 runners.metrics.sweepErrorsAlarm(stack, {
