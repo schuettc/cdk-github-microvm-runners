@@ -54,8 +54,10 @@ import {
 import {
   allIngressConnectorArn,
   MAX_DURATION_GRACE_SECONDS,
+  PLATFORM_VM_LIFETIME_CEILING_SECONDS,
   readEgressConnectors,
   resolveRuntimeLogging,
+  warmVmCanServeJob,
 } from './shared/launch-params.js';
 import {
   createMicrovmAuthToken,
@@ -764,7 +766,38 @@ async function tryWarmPath(params: {
   let jitConfigPushed = false;
   try {
     const candidates = await listSuspendedVmsForImage(params.imageArn);
-    for (const microvmId of candidates) {
+    for (const candidate of candidates) {
+      const { microvmId } = candidate;
+
+      // Never hand a job a VM that cannot outlive it. The platform's lifetime
+      // clock started when the pool CREATED this VM and ran the whole time it
+      // sat SUSPENDED, and it cannot be re-armed on resume, so an old pooled
+      // VM accepts the job and then disappears part-way through — the runner
+      // vanishes, the step never completes, and nothing in this library logs
+      // anything, because nothing in this library terminated it. Skipping to
+      // a cold boot is strictly better: cold is slower to start and certain
+      // to finish.
+      if (
+        !warmVmCanServeJob({
+          startedAtMs: candidate.startedAtMs,
+          nowMs: params.nowMs,
+          capSeconds: PLATFORM_VM_LIFETIME_CEILING_SECONDS,
+          maxJobDurationSeconds: params.maxJobDurationSeconds,
+        })
+      ) {
+        console.warn(
+          JSON.stringify({
+            msg: 'launcher: skipping warm VM with insufficient remaining lifetime',
+            microvmId,
+            ageSeconds: Math.round(
+              (params.nowMs - candidate.startedAtMs) / 1000,
+            ),
+            maxJobDurationSeconds: params.maxJobDurationSeconds,
+          }),
+        );
+        continue;
+      }
+
       const won = await claimWarmVm({
         microvmId,
         nowMs: params.nowMs,

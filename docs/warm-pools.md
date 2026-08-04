@@ -51,6 +51,38 @@ drains it and before the next sweep refills it.
 That fallback means a warm pool is an optimization, never a dependency. A pool
 that fails to refill costs latency, not correctness.
 
+## How long a pooled VM lasts
+
+Every MicroVM carries a platform lifetime cap, fixed when the VM is created and
+never changeable afterwards — `ResumeMicrovm` takes only a VM id, and the
+service has no update call. The clock runs from creation, and it keeps running
+while the VM sits suspended in the pool.
+
+So a pooled VM is created with the platform's **maximum** lifetime of eight
+hours rather than the job budget a cold launch uses. That is deliberate: were a
+pooled VM capped at `maxJobDuration` plus its grace, the time it spent waiting
+in the pool would come out of the job's budget, and a VM claimed near the end of
+that window would be terminated part-way through the job it had just accepted.
+
+Two things follow, both automatic:
+
+- The sweep **retires a pooled VM once its remaining lifetime can no longer
+  cover a full `maxJobDuration`**, and refills the slot. Retired VMs do not
+  count toward the pool's target, so `poolCurrent` reflects VMs that can
+  actually take a job.
+- The launcher **skips any pooled VM without the budget to outlive the job**
+  and cold-launches instead, logging the skip. This is a backstop for the
+  window between sweeps.
+
+With the default two-minute interval you will not normally see either. Both
+matter when a pool has been sitting idle for hours — after a quiet weekend, say
+— which is exactly when a stale VM would otherwise be claimed.
+
+Because the cap is the platform maximum, the platform's own runaway-job guard
+is looser on a warm VM than a cold one. The janitor's lifetime sweep, which
+works from the runner record rather than the VM, is what still bounds a job
+that hangs.
+
 ## What it costs
 
 Pooled VMs are suspended, not running, and **do not count against
