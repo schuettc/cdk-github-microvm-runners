@@ -369,6 +369,12 @@ export interface SuspendedVm {
   readonly microvmId: string;
   /** `startedAt` as epoch milliseconds — when the platform's lifetime clock began. */
   readonly startedAtMs: number;
+  /**
+   * The image version this VM booted from. The image Name, and therefore the
+   * ARN, is stable across rebuilds, so a pooled VM matching on ARN may still
+   * be carrying superseded content — this is what distinguishes them.
+   */
+  readonly imageVersion?: string;
 }
 
 /**
@@ -419,6 +425,7 @@ export async function listSuspendedVmsForImage(
         result.push({
           microvmId: item.microvmId,
           startedAtMs: item.startedAt.getTime(),
+          imageVersion: item.imageVersion,
         });
       }
     }

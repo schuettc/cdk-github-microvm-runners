@@ -74,6 +74,13 @@ Two things follow, both automatic:
   and cold-launches instead, logging the skip. This is a backstop for the
   window between sweeps.
 
+The same two places also retire and skip a pooled VM built from a **superseded
+image version**. An image keeps its name when its contents change (see
+[Images](images.md)), so its ARN stays the same across rebuilds, and a VM
+suspended before a deploy would otherwise still look like a match afterwards
+and run a job on the previous image. Version equality is what actually
+establishes that a pooled VM carries the image the deploy published.
+
 With the default two-minute interval you will not normally see either. Both
 matter when a pool has been sitting idle for hours — after a quiet weekend, say
 — which is exactly when a stale VM would otherwise be claimed.

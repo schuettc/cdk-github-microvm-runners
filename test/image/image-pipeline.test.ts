@@ -80,7 +80,7 @@ describe('ImagePipeline (RunnerImage.fromOptions())', () => {
         }),
       },
       Logging: { CloudWatch: {} },
-      Name: Match.stringLikeRegexp('^runners-dev-[0-9a-f]{8}$'),
+      Name: 'runners-dev',
     });
   });
 
@@ -346,7 +346,7 @@ describe('ImagePipeline (RunnerImage.fromOptions())', () => {
 
     expect(pipeline.imageResource).toBeInstanceOf(lambda.CfnMicrovmImage);
     expect(pipeline.imageArn).toBe(pipeline.imageResource.attrImageArn);
-    expect(pipeline.imageName).toMatch(/^runners-dev-[0-9a-f]{8}$/);
+    expect(pipeline.imageName).toBe('runners-dev');
     expect(pipeline.buildRole.roleArn).toBeDefined();
   });
 
@@ -523,7 +523,7 @@ describe('ImagePipeline (RunnerImage.fromInline())', () => {
     ]);
   });
 
-  it('creates the MicrovmImage resource, named for the runner set and the content hash', () => {
+  it('creates the MicrovmImage resource, named for the runner set alone', () => {
     const { app } = newApp();
     const stack = newStack(app);
 
@@ -542,12 +542,12 @@ describe('ImagePipeline (RunnerImage.fromInline())', () => {
       AdditionalOsCapabilities: ['ALL'],
       CpuConfigurations: [{ Architecture: 'ARM_64' }],
       Resources: [{ MinimumMemoryInMiB: 2048 }],
-      Name: Match.stringLikeRegexp('^runners-inline-[0-9a-f]{8}$'),
+      Name: 'runners-inline',
     });
   });
 
-  it('a different inline Dockerfile produces a different image Name', () => {
-    function imageNameFor(dockerfile: string): string {
+  it('a different inline Dockerfile keeps the image Name but moves the code artifact', () => {
+    function synthFor(dockerfile: string): { name: string; uri: string } {
       const { app } = newApp();
       const stack = newStack(app);
       const pipeline = new ImagePipeline(stack, 'Pipeline', {
@@ -557,15 +557,26 @@ describe('ImagePipeline (RunnerImage.fromInline())', () => {
         imageLogs: ImageLogs.enabled(),
         runnerSetId: 'runners-inline',
       });
-      return pipeline.imageName;
+      const uri = Template.fromStack(stack).findResources(
+        'AWS::Lambda::MicrovmImage',
+      );
+      return {
+        name: pipeline.imageName,
+        uri: JSON.stringify(Object.values(uri)[0].Properties.CodeArtifact.Uri),
+      };
     }
 
-    expect(imageNameFor(INLINE_DOCKERFILE)).toBe(
-      imageNameFor(INLINE_DOCKERFILE),
-    );
-    expect(imageNameFor(INLINE_DOCKERFILE)).not.toBe(
-      imageNameFor(INLINE_DOCKERFILE.replace('git', 'jq')),
-    );
+    const base = synthFor(INLINE_DOCKERFILE);
+    const changed = synthFor(INLINE_DOCKERFILE.replace('git', 'jq'));
+
+    // The Name is the ONLY property whose change forces CloudFormation to
+    // REPLACE the image, and a replacement is the only way to collide with an
+    // image name the account already holds. Holding it still is what makes
+    // that collision impossible.
+    expect(changed.name).toBe(base.name);
+    expect(base.name).toBe('runners-inline');
+    // Rebuild-on-change still works, via the content-hashed build asset.
+    expect(changed.uri).not.toBe(base.uri);
   });
 });
 
@@ -774,7 +785,7 @@ describe('ImagePipeline runnerSetId validation', () => {
     ).toThrow(/runnerSetId/);
   });
 
-  it('throws when runnerSetId + hash suffix would exceed the 64-char Name limit', () => {
+  it('throws when the runnerSetId would exceed the 64-char Name limit', () => {
     const { app } = newApp();
     const stack = newStack(app);
 
@@ -785,12 +796,12 @@ describe('ImagePipeline runnerSetId validation', () => {
           size: MicrovmSize.GB1,
           network: RunnerNetwork.internetEgress(),
           imageLogs: ImageLogs.enabled(),
-          runnerSetId: 'a'.repeat(60),
+          runnerSetId: 'a'.repeat(65),
         }),
     ).toThrow(/64/);
   });
 
-  it('accepts a runnerSetId at the exact 55-char boundary', () => {
+  it('accepts a runnerSetId at the exact 64-char boundary', () => {
     const { app } = newApp();
     const stack = newStack(app);
 
@@ -801,12 +812,12 @@ describe('ImagePipeline runnerSetId validation', () => {
           size: MicrovmSize.GB1,
           network: RunnerNetwork.internetEgress(),
           imageLogs: ImageLogs.enabled(),
-          runnerSetId: 'a'.repeat(55),
+          runnerSetId: 'a'.repeat(64),
         }),
     ).not.toThrow();
   });
 
-  it('throws for a runnerSetId one character past the 55-char boundary', () => {
+  it('throws for a runnerSetId one character past the 64-char boundary', () => {
     const { app } = newApp();
     const stack = newStack(app);
 
@@ -817,7 +828,7 @@ describe('ImagePipeline runnerSetId validation', () => {
           size: MicrovmSize.GB1,
           network: RunnerNetwork.internetEgress(),
           imageLogs: ImageLogs.enabled(),
-          runnerSetId: 'a'.repeat(56),
+          runnerSetId: 'a'.repeat(65),
         }),
     ).toThrow(/64/);
   });

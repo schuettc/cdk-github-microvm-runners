@@ -209,6 +209,7 @@ async function convergeLabel(
   imageArn: string,
   target: number,
   runnerSetId: string,
+  imageVersion?: string,
 ): Promise<void> {
   const suspended = await listSuspendedVmsForImage(imageArn);
   const maxJobDurationSeconds = numEnv('MAX_JOB_DURATION_SECONDS');
@@ -221,13 +222,27 @@ async function convergeLabel(
   // looks healthy and does nothing. They are retired here instead, which
   // frees the launcher from ever seeing them and lets convergence refill the
   // slot with a VM that has a full budget.
-  const usable = suspended.filter((vm) =>
-    warmVmCanServeJob({
-      startedAtMs: vm.startedAtMs,
-      nowMs,
-      capSeconds: PLATFORM_VM_LIFETIME_CEILING_SECONDS,
-      maxJobDurationSeconds,
-    }),
+  // Superseded content is retired on the same pass, for the same reason: the
+  // image Name is stable across rebuilds so the ARN is too, and a VM booted
+  // from an earlier version still matches on ARN. Left in the pool it would
+  // count toward target and serve jobs on the previous image after a deploy
+  // reported success. A VM whose version is unknown, or a runner set whose
+  // config predates versioned size classes, is left alone rather than
+  // destroyed on a guess.
+  const currentContent = (vm: { imageVersion?: string }): boolean =>
+    imageVersion === undefined ||
+    vm.imageVersion === undefined ||
+    vm.imageVersion === imageVersion;
+
+  const usable = suspended.filter(
+    (vm) =>
+      currentContent(vm) &&
+      warmVmCanServeJob({
+        startedAtMs: vm.startedAtMs,
+        nowMs,
+        capSeconds: PLATFORM_VM_LIFETIME_CEILING_SECONDS,
+        maxJobDurationSeconds,
+      }),
   );
   const expired = suspended.filter((vm) => !usable.includes(vm));
 
@@ -308,7 +323,13 @@ export async function handler(): Promise<void> {
       continue;
     }
     try {
-      await convergeLabel(label, entry.imageArn, target, runnerSetId);
+      await convergeLabel(
+        label,
+        entry.imageArn,
+        target,
+        runnerSetId,
+        entry.imageVersion,
+      );
     } catch (err) {
       console.error(
         JSON.stringify({
