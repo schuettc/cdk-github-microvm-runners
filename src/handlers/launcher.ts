@@ -253,7 +253,7 @@ async function pushJitConfig(
  */
 function resolveMatchedSizeClass(
   labels: string[],
-): { label: string; imageArn: string } | undefined {
+): { label: string; imageArn: string; imageVersion?: string } | undefined {
   const sizeClasses = readSizeClasses();
   const labelSet = new Set(labels);
   let matched: string | undefined;
@@ -263,7 +263,11 @@ function resolveMatchedSizeClass(
     }
   }
   return matched
-    ? { label: matched, imageArn: sizeClasses[matched].imageArn }
+    ? {
+        label: matched,
+        imageArn: sizeClasses[matched].imageArn,
+        imageVersion: sizeClasses[matched].imageVersion,
+      }
     : undefined;
 }
 
@@ -721,6 +725,7 @@ function emitLaunchMetrics(params: {
 async function tryWarmPath(params: {
   label: string;
   imageArn: string;
+  imageVersion?: string;
   runnerName: string;
   repo: string;
   jobId: number;
@@ -768,6 +773,29 @@ async function tryWarmPath(params: {
     const candidates = await listSuspendedVmsForImage(params.imageArn);
     for (const candidate of candidates) {
       const { microvmId } = candidate;
+
+      // Never hand a job a VM built from superseded image content. The image
+      // Name is stable across rebuilds, so its ARN is too, and a pooled VM
+      // that predates the newest build still matches on ARN — it would run
+      // the job on the previous image while the deploy that replaced it
+      // reported success. Version equality is what actually says "same
+      // content"; the sweep retires these, and this covers the window
+      // between sweeps.
+      if (
+        params.imageVersion !== undefined &&
+        candidate.imageVersion !== undefined &&
+        candidate.imageVersion !== params.imageVersion
+      ) {
+        console.warn(
+          JSON.stringify({
+            msg: 'launcher: skipping warm VM built from a superseded image version',
+            microvmId,
+            vmImageVersion: candidate.imageVersion,
+            currentImageVersion: params.imageVersion,
+          }),
+        );
+        continue;
+      }
 
       // Never hand a job a VM that cannot outlive it. The platform's lifetime
       // clock started when the pool CREATED this VM and ran the whole time it
@@ -1183,6 +1211,7 @@ async function handleLaunch(message: LaunchMessage): Promise<void> {
     const warmResult = await tryWarmPath({
       label: matchedSizeClass.label,
       imageArn: matchedSizeClass.imageArn,
+      imageVersion: matchedSizeClass.imageVersion,
       runnerName,
       repo: message.repo,
       jobId: message.jobId,

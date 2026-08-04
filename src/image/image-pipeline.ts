@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import {
   cpSync,
   existsSync,
@@ -33,10 +32,9 @@ import type { RunnerNetwork } from '../types/runner-network.js';
  */
 const AGENT_RUNTIME_DIR = join(__dirname, 'assets');
 
-/** `AWS::Lambda::MicrovmImage` Name pattern; the pipeline appends `-<8-hex-char contentHash prefix>`. */
+/** `AWS::Lambda::MicrovmImage` Name pattern; the runner set id is used verbatim as the Name. */
 const RUNNER_SET_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const MAX_IMAGE_NAME_LENGTH = 64;
-const HASH_PREFIX_LENGTH = 8;
 
 /** The version of the managed `al2023-1` base MicroVM image built from by default — tunable via {@link ImagePipelineProps.baseImageVersion} should AWS publish a newer one. */
 const DEFAULT_BASE_IMAGE_VERSION = '0';
@@ -56,12 +54,14 @@ export interface ImagePipelineProps {
   /** Where the build's logs go. Left unset, the build emits no logs; `ImageLogs.enabled()` sends them to the platform's group, and `ImageLogs.enabled(logGroup)` to a group you supply. */
   readonly imageLogs?: ImageLogs;
   /**
-   * Identifier for the runner set this image belongs to. It is combined with
-   * the first 8 hex characters of the image's `contentHash` to form the
-   * image's name, so a content change publishes a new image and an unchanged
-   * one is a no-op. Must match `^[a-zA-Z0-9-_]+$`, and must be 55 characters
-   * or fewer so that `<runnerSetId>-<8-hex-chars>` stays within the service's
-   * 64-character name limit.
+   * Identifier for the runner set this image belongs to, used verbatim as the
+   * image's name. It is deliberately stable: the name is the only property
+   * whose change forces CloudFormation to replace the image, so holding it
+   * still keeps every content change an in-place update that adds a version.
+   * A content change is still picked up — the build context is a
+   * content-hashed CDK asset, so it moves `codeArtifact` — and an unchanged
+   * one is still a no-op. Must match `^[a-zA-Z0-9-_]+$` and be 64 characters
+   * or fewer, the service's name limit.
    */
   readonly runnerSetId: string;
   /** Version of the managed `al2023-1` base image to build from. @default '0' */
@@ -96,8 +96,10 @@ export interface ImagePipelineProps {
 export class ImagePipeline extends Construct {
   /** ARN of the built MicroVM image. */
   public readonly imageArn: string;
-  /** Name of the built MicroVM image, `<runnerSetId>-<8 hex characters of the content hash>`. */
+  /** Name of the built MicroVM image — the per-class `runnerSetId`, stable for the life of the runner class. */
   public readonly imageName: string;
+  /** The image's latest active version, which advances every time the image is rebuilt in place. */
+  public readonly imageVersion: string;
   /** The underlying `AWS::Lambda::MicrovmImage` resource. */
   public readonly imageResource: lambda.CfnMicrovmImage;
   /** IAM role the image build runs as, able to read the staged build context and pull any private container base image. */
@@ -107,24 +109,47 @@ export class ImagePipeline extends Construct {
     super(scope, id);
 
     validateRunnerSetId(props.runnerSetId);
-    // The image Name hash must ALSO cover the packaged microvm-runner runtime
-    // assets (agent.mjs, entrypoint.sh): RunnerImage.contentHash only hashes
-    // the rendered Dockerfile + consumer options, so an agent change would
-    // otherwise keep the same Name and never trigger a CFN rebuild —
-    // found live 2026-07-19 when an agent fix silently didn't ship.
-    const agentAssetsHash = createHash('sha256')
-      .update(readFileSync(join(AGENT_RUNTIME_DIR, 'agent.mjs')))
-      .update(readFileSync(join(AGENT_RUNTIME_DIR, 'entrypoint.sh')))
-      .digest('hex');
-    const hashPrefix = createHash('sha256')
-      .update(props.image.contentHash)
-      .update(agentAssetsHash)
-      .digest('hex')
-      .slice(0, HASH_PREFIX_LENGTH);
-    const imageName = `${props.runnerSetId}-${hashPrefix}`;
+    // STABLE, deliberately — the Name carries no content hash.
+    //
+    // `Name` is the ONLY property on AWS::Lambda::MicrovmImage whose update
+    // behaviour is "Replacement"; every other property is "No interruption"
+    // (CloudFormation resource reference, confirmed 2026-08-04). So a Name
+    // that moved with the content was single-handedly turning every content
+    // change into a replace-then-delete, and replace-then-delete is the only
+    // way to reach:
+    //
+    //   Resource handler returned message: "null already exists."
+    //     (HandlerErrorCode: AlreadyExists)
+    //
+    // Image names are never reclaimed — nothing in this library deletes a
+    // whole image, only versions inside one — so every content hash a runner
+    // set had ever built stayed reserved forever, and any RETURN to earlier
+    // content (a revert, a library downgrade, an option flipped back, a
+    // toolchain A/B) collided with its own history and rolled the stack back.
+    //
+    // Holding the Name still makes that structurally impossible: no property
+    // forces replacement, so CloudFormation updates this image in place and
+    // adds a VERSION instead of minting a second image. That is also the
+    // model the janitor was built for — it prunes versions within an image
+    // (`DeleteMicrovmImageVersion`) and has never had a way to delete images.
+    //
+    // Rebuild-on-change is unaffected, and never depended on the Name: the
+    // build context (Dockerfile, consumer assets, AND the packaged agent —
+    // see `stageBuildContext`) is an s3_assets.Asset whose content hash is
+    // its object URL, so any content change moves `codeArtifact` and CFN sees
+    // an update. This is what the 2026-07-19 agent-fix-didn't-ship incident
+    // needed; folding the agent into a Name hash was a second, redundant
+    // mechanism for it.
+    //
+    // `props.runnerSetId` already carries the per-class index appended by
+    // `addRunnerClass` (`<runnerSetId><index>`), so two classes building
+    // identical content still get distinct names. The runner set id is itself
+    // a hash of the construct path, so the name is stable across synths and
+    // unique per construct instance.
+    const imageName = props.runnerSetId;
     if (imageName.length > MAX_IMAGE_NAME_LENGTH) {
       throw new Error(
-        `ImagePipeline: runnerSetId "${props.runnerSetId}" is too long — the resulting image Name "${imageName}" is ${imageName.length} characters, exceeding AWS::Lambda::MicrovmImage's 64-character limit once the ${HASH_PREFIX_LENGTH}-char content-hash suffix (plus separator) is appended. Use a runnerSetId of ${MAX_IMAGE_NAME_LENGTH - HASH_PREFIX_LENGTH - 1} characters or fewer.`,
+        `ImagePipeline: runnerSetId "${props.runnerSetId}" is too long — it is used verbatim as the image Name, which AWS::Lambda::MicrovmImage limits to ${MAX_IMAGE_NAME_LENGTH} characters. Use a runnerSetId of ${MAX_IMAGE_NAME_LENGTH} characters or fewer.`,
       );
     }
     this.imageName = imageName;
@@ -266,13 +291,18 @@ export class ImagePipeline extends Construct {
     });
 
     this.imageArn = this.imageResource.attrImageArn;
+    // Advances on every in-place rebuild. Carried to the launcher and warm
+    // pool so they can tell a pooled VM booted from an older version apart
+    // from a current one — with the Name (and therefore the ARN) now stable,
+    // ARN equality alone no longer implies same content.
+    this.imageVersion = this.imageResource.attrLatestActiveImageVersion;
   }
 }
 
 function validateRunnerSetId(runnerSetId: string): void {
   if (!RUNNER_SET_ID_PATTERN.test(runnerSetId)) {
     throw new Error(
-      `ImagePipeline: runnerSetId "${runnerSetId}" is invalid — it must match ${RUNNER_SET_ID_PATTERN} (AWS::Lambda::MicrovmImage's Name pattern is ^[a-zA-Z0-9-_]+$, and the pipeline appends "-<8-hex-char hash>" to it).`,
+      `ImagePipeline: runnerSetId "${runnerSetId}" is invalid — it must match ${RUNNER_SET_ID_PATTERN} (AWS::Lambda::MicrovmImage's Name pattern is ^[a-zA-Z0-9-_]+$, and the runner set id is used verbatim as the image Name).`,
     );
   }
 }

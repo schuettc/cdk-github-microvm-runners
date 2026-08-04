@@ -31,6 +31,15 @@ export interface ScopeConfig {
 /** One entry of the parsed `SIZE_CLASSES_JSON` env var. */
 export interface SizeClassEntry {
   imageArn: string;
+  /**
+   * The image's current version. Present so the warm path can tell a pooled
+   * VM booted from an older build apart from a current one: the image Name —
+   * and therefore the ARN — is stable across rebuilds now, so ARN equality no
+   * longer implies same content. Optional so a runner set synthesized by an
+   * older library version, whose SIZE_CLASSES_JSON carries no version, keeps
+   * parsing; the warm path skips the version check when it is absent.
+   */
+  imageVersion?: string;
 }
 
 /**

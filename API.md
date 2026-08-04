@@ -586,8 +586,9 @@ Any object.
 | <code><a href="#cdk-github-microvm-runners.ImagePipeline.property.node">node</a></code> | <code>constructs.Node</code> | The tree node. |
 | <code><a href="#cdk-github-microvm-runners.ImagePipeline.property.buildRole">buildRole</a></code> | <code>aws-cdk-lib.aws_iam.IRole</code> | IAM role the image build runs as, able to read the staged build context and pull any private container base image. |
 | <code><a href="#cdk-github-microvm-runners.ImagePipeline.property.imageArn">imageArn</a></code> | <code>string</code> | ARN of the built MicroVM image. |
-| <code><a href="#cdk-github-microvm-runners.ImagePipeline.property.imageName">imageName</a></code> | <code>string</code> | Name of the built MicroVM image, `<runnerSetId>-<8 hex characters of the content hash>`. |
+| <code><a href="#cdk-github-microvm-runners.ImagePipeline.property.imageName">imageName</a></code> | <code>string</code> | Name of the built MicroVM image — the per-class `runnerSetId`, stable for the life of the runner class. |
 | <code><a href="#cdk-github-microvm-runners.ImagePipeline.property.imageResource">imageResource</a></code> | <code>aws-cdk-lib.aws_lambda.CfnMicrovmImage</code> | The underlying `AWS::Lambda::MicrovmImage` resource. |
+| <code><a href="#cdk-github-microvm-runners.ImagePipeline.property.imageVersion">imageVersion</a></code> | <code>string</code> | The image's latest active version, which advances every time the image is rebuilt in place. |
 
 ---
 
@@ -635,7 +636,7 @@ public readonly imageName: string;
 
 - *Type:* string
 
-Name of the built MicroVM image, `<runnerSetId>-<8 hex characters of the content hash>`.
+Name of the built MicroVM image — the per-class `runnerSetId`, stable for the life of the runner class.
 
 ---
 
@@ -648,6 +649,18 @@ public readonly imageResource: CfnMicrovmImage;
 - *Type:* aws-cdk-lib.aws_lambda.CfnMicrovmImage
 
 The underlying `AWS::Lambda::MicrovmImage` resource.
+
+---
+
+##### `imageVersion`<sup>Required</sup> <a name="imageVersion" id="cdk-github-microvm-runners.ImagePipeline.property.imageVersion"></a>
+
+```typescript
+public readonly imageVersion: string;
+```
+
+- *Type:* string
+
+The image's latest active version, which advances every time the image is rebuilt in place.
 
 ---
 
@@ -1304,7 +1317,7 @@ const imagePipelineProps: ImagePipelineProps = { ... }
 | --- | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.ImagePipelineProps.property.image">image</a></code> | <code><a href="#cdk-github-microvm-runners.RunnerImage">RunnerImage</a></code> | The runner image to build: `RunnerImage.fromOptions()` for a synthesized Dockerfile, `RunnerImage.fromInline(text)` for Dockerfile text, or `RunnerImage.fromDockerfile(dir)` for a Dockerfile and build context on disk. |
 | <code><a href="#cdk-github-microvm-runners.ImagePipelineProps.property.network">network</a></code> | <code><a href="#cdk-github-microvm-runners.RunnerNetwork">RunnerNetwork</a></code> | How the build and the VMs reach the network. |
-| <code><a href="#cdk-github-microvm-runners.ImagePipelineProps.property.runnerSetId">runnerSetId</a></code> | <code>string</code> | Identifier for the runner set this image belongs to. |
+| <code><a href="#cdk-github-microvm-runners.ImagePipelineProps.property.runnerSetId">runnerSetId</a></code> | <code>string</code> | Identifier for the runner set this image belongs to, used verbatim as the image's name. |
 | <code><a href="#cdk-github-microvm-runners.ImagePipelineProps.property.size">size</a></code> | <code><a href="#cdk-github-microvm-runners.MicrovmSize">MicrovmSize</a></code> | The size the built image runs at, which becomes its memory floor. |
 | <code><a href="#cdk-github-microvm-runners.ImagePipelineProps.property.baseImageVersion">baseImageVersion</a></code> | <code>string</code> | Version of the managed `al2023-1` base image to build from. |
 | <code><a href="#cdk-github-microvm-runners.ImagePipelineProps.property.imageLogs">imageLogs</a></code> | <code><a href="#cdk-github-microvm-runners.ImageLogs">ImageLogs</a></code> | Where the build's logs go. |
@@ -1345,14 +1358,15 @@ public readonly runnerSetId: string;
 
 - *Type:* string
 
-Identifier for the runner set this image belongs to.
+Identifier for the runner set this image belongs to, used verbatim as the image's name.
 
-It is combined with
-the first 8 hex characters of the image's `contentHash` to form the
-image's name, so a content change publishes a new image and an unchanged
-one is a no-op. Must match `^[a-zA-Z0-9-_]+$`, and must be 55 characters
-or fewer so that `<runnerSetId>-<8-hex-chars>` stays within the service's
-64-character name limit.
+It is deliberately stable: the name is the only property
+whose change forces CloudFormation to replace the image, so holding it
+still keeps every content change an in-place update that adds a version.
+A content change is still picked up — the build context is a
+content-hashed CDK asset, so it moves `codeArtifact` — and an unchanged
+one is still a no-op. Must match `^[a-zA-Z0-9-_]+$` and be 64 characters
+or fewer, the service's name limit.
 
 ---
 

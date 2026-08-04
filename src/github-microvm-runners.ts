@@ -856,6 +856,8 @@ export class GithubMicrovmRunnersMetrics {
 interface InternalRunnerClass extends RunnerClass {
   readonly warmPoolSize?: number;
   readonly idlePolicy?: MicrovmIdlePolicy;
+  /** The class image's current version, carried to the warm path so it can reject a pooled VM booted from an older build. */
+  readonly imageVersion: string;
 }
 
 /**
@@ -1226,7 +1228,10 @@ export class GithubMicrovmRunners extends Construct {
       produce: () =>
         JSON.stringify(
           Object.fromEntries(
-            this.classRegistry.map((c) => [c.label, { imageArn: c.imageArn }]),
+            this.classRegistry.map((c) => [
+              c.label,
+              { imageArn: c.imageArn, imageVersion: c.imageVersion },
+            ]),
           ),
         ),
     });
@@ -1614,6 +1619,7 @@ export class GithubMicrovmRunners extends Construct {
       size: props.size,
       imagePipeline: pipeline,
       imageArn: pipeline.imageArn,
+      imageVersion: pipeline.imageVersion,
       warmPoolSize: props.warmPoolSize,
       idlePolicy: props.idlePolicy,
     };
