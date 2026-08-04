@@ -61,6 +61,7 @@ jobs:
           private-key: ${{ secrets.PROJEN_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
       - name: Checkout
         uses: actions/checkout@v6
         with:
