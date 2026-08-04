@@ -337,7 +337,7 @@ describe('listSuspendedVmsForImage', () => {
 
     const ids = await listSuspendedVmsForImage(IMAGE_ARN);
 
-    expect(ids).toEqual(['mvm-suspended-match']);
+    expect(ids.map((v) => v.microvmId)).toEqual(['mvm-suspended-match']);
   });
 
   it('paginates via nextToken across multiple ListMicrovms pages', async () => {
@@ -369,7 +369,7 @@ describe('listSuspendedVmsForImage', () => {
 
     const ids = await listSuspendedVmsForImage(IMAGE_ARN);
 
-    expect(ids).toEqual(['mvm-page1', 'mvm-page2']);
+    expect(ids.map((v) => v.microvmId)).toEqual(['mvm-page1', 'mvm-page2']);
     const calls = mvmMock.commandCalls(ListMicrovmsCommand);
     expect(calls).toHaveLength(2);
     // maxResults: the service maximum, so a busy account pages fewer times.
@@ -424,7 +424,7 @@ describe('listSuspendedVmsForImage', () => {
     await jest.advanceTimersByTimeAsync(5_000);
     const ids = await resultPromise;
 
-    expect(ids).toEqual(['mvm-after-retry']);
+    expect(ids.map((v) => v.microvmId)).toEqual(['mvm-after-retry']);
     expect(mvmMock.commandCalls(ListMicrovmsCommand)).toHaveLength(3);
   });
 

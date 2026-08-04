@@ -21,6 +21,19 @@ const waitForMicrovmRunningMock = jest.mocked(waitForMicrovmRunning);
 const suspendMicrovmMock = jest.mocked(suspendMicrovm);
 const terminateMicrovmMock = jest.mocked(terminateMicrovm);
 
+/**
+ * A pooled VM young enough to still serve a full job — the ordinary case.
+ * Age matters now that the sweep retires VMs whose remaining platform
+ * lifetime can no longer cover `MAX_JOB_DURATION_SECONDS` + grace, so every
+ * fixture has to be explicit about it rather than implying "new".
+ */
+function freshWarmVm(microvmId: string): {
+  microvmId: string;
+  startedAtMs: number;
+} {
+  return { microvmId, startedAtMs: Date.now() };
+}
+
 const ORIGINAL_ENV = { ...process.env };
 
 const IMAGE_ARN_DEFAULT =
@@ -90,7 +103,7 @@ beforeEach(() => {
   waitForMicrovmRunningMock.mockReset();
   suspendMicrovmMock.mockReset();
   terminateMicrovmMock.mockReset();
-  listSuspendedVmsForImageMock.mockResolvedValue(['mvm-warm-1']);
+  listSuspendedVmsForImageMock.mockResolvedValue([freshWarmVm('mvm-warm-1')]);
   runMicrovmMock.mockImplementation(async () => {
     runMicrovmCounter += 1;
     return `mvm-new-${runMicrovmCounter}`;
@@ -127,7 +140,12 @@ describe('handler', () => {
     expect(runMicrovmMock).toHaveBeenCalledTimes(2);
     expect(runMicrovmMock.mock.calls[0][0]).toMatchObject({
       imageArn: IMAGE_ARN_DEFAULT,
-      maximumDurationInSeconds: 3600 + 300,
+      // The platform ceiling, NOT `maxJobDuration + grace` (which is what the
+      // cold path uses and what this assertion used to require). The lifetime
+      // clock starts here and runs while the VM waits in the pool, and it
+      // cannot be re-armed on resume, so capping a pooled VM at the job budget
+      // spends that budget on residency and kills the job mid-run.
+      maximumDurationInSeconds: 28800,
     });
     expect(waitForMicrovmRunningMock).toHaveBeenCalledTimes(2);
     expect(suspendMicrovmMock).toHaveBeenCalledTimes(2);
@@ -171,6 +189,54 @@ describe('handler', () => {
       'arn:aws:iam::1:role/runners-runner-set-x-vm-role',
     );
     expect(runInput.logging).toEqual({ cloudWatch: {} });
+  });
+
+  it('retires a pooled VM whose remaining lifetime can no longer cover a full job, and replaces it', async () => {
+    setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 1 }) });
+    // Aged so that 28800 - age < 3600 + 300: it cannot outlive a full job.
+    listSuspendedVmsForImageMock.mockResolvedValue([
+      { microvmId: 'mvm-stale', startedAtMs: Date.now() - 28_000 * 1000 },
+    ]);
+
+    await handler();
+
+    expect(terminateMicrovmMock).toHaveBeenCalledWith('mvm-stale');
+    // The crux: an aged-out VM must NOT count toward target. Counting it
+    // would leave the pool reporting itself full while every claim skipped
+    // past it to a cold boot — the same bug, one level up and quieter.
+    expect(runMicrovmMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a pooled VM that has aged but can still outlive a full job', async () => {
+    setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 1 }) });
+    // Two hours old: 28800 - 7200 = 21600 remaining, comfortably over 3900.
+    // Under the old job-budget cap this VM would already have been dead.
+    listSuspendedVmsForImageMock.mockResolvedValue([
+      { microvmId: 'mvm-aged-ok', startedAtMs: Date.now() - 7200 * 1000 },
+    ]);
+
+    await handler();
+
+    expect(terminateMicrovmMock).not.toHaveBeenCalled();
+    expect(runMicrovmMock).not.toHaveBeenCalled();
+  });
+
+  it('a terminate failure while retiring does not abort convergence', async () => {
+    setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 1 }) });
+    listSuspendedVmsForImageMock.mockResolvedValue([
+      { microvmId: 'mvm-stale', startedAtMs: Date.now() - 28_000 * 1000 },
+    ]);
+    terminateMicrovmMock.mockRejectedValueOnce(new Error('boom: terminate'));
+    const errSpy = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    // Still refills the slot; the undeleted VM is the janitor's problem.
+    expect(runMicrovmMock).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 
   it('does not launch anything when current already meets target', async () => {
@@ -248,7 +314,7 @@ describe('handler', () => {
       WARM_POOL_JSON: JSON.stringify({ microvm: 1, 'microvm-8gb': 2 }),
     });
     listSuspendedVmsForImageMock.mockImplementation(async (imageArn) =>
-      imageArn === IMAGE_ARN_8GB ? [] : ['mvm-warm-1'],
+      imageArn === IMAGE_ARN_8GB ? [] : [freshWarmVm('mvm-warm-1')],
     );
 
     await handler();
@@ -267,7 +333,7 @@ describe('handler', () => {
       if (imageArn === IMAGE_ARN_8GB) {
         throw new Error('boom: ListMicrovms failed');
       }
-      return ['mvm-warm-1'];
+      return [freshWarmVm('mvm-warm-1')];
     });
 
     await handler();
@@ -313,7 +379,7 @@ describe('handler — per-tick pool fill metrics', () => {
       WARM_POOL_JSON: JSON.stringify({ microvm: 1, 'microvm-8gb': 2 }),
     });
     listSuspendedVmsForImageMock.mockImplementation(async (imageArn) =>
-      imageArn === IMAGE_ARN_8GB ? [] : ['mvm-warm-1'],
+      imageArn === IMAGE_ARN_8GB ? [] : [freshWarmVm('mvm-warm-1')],
     );
     const logSpy = jest
       .spyOn(console, 'log')

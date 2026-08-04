@@ -22,6 +22,46 @@ import type { LoggingConfig } from './runner-set-config.js';
 /** Grace period added to the caller-supplied job duration for MicroVM `maximumDurationInSeconds`. */
 export const MAX_DURATION_GRACE_SECONDS = 300;
 
+/**
+ * The platform's hard ceiling for `maximumDurationInSeconds` (8h) — the
+ * largest value `RunMicrovm` accepts. Mirrors
+ * `github-microvm-runners.ts`'s `PLATFORM_VM_LIFETIME_CEILING_SECONDS`, which
+ * uses it at synth time to bound `maxJobDuration`; this copy is the runtime
+ * one, used by the warm pool when it creates a pooled VM.
+ */
+export const PLATFORM_VM_LIFETIME_CEILING_SECONDS = 8 * 3600;
+
+/**
+ * Whether a pooled VM created at `startedAtMs` can still outlive a
+ * full-length job started now.
+ *
+ * The platform's lifetime clock starts at `RunMicrovm` and keeps running
+ * while the VM sits SUSPENDED in the pool, and the cap cannot be re-armed on
+ * resume — `ResumeMicrovm` accepts only a `microvmIdentifier`, and the service
+ * exposes no `UpdateMicrovm`. So a pooled VM's real budget for a job is
+ * `capSeconds - age`, and handing a job a VM with less than a full
+ * `maxJobDuration + grace` left is what killed jobs mid-run: the VM simply
+ * vanished, with `stateReason` "MicroVM exceeded maximum lifetime" and nothing
+ * logged by this library, because nothing in this library terminated it.
+ *
+ * Callers pass the cap the pool CREATED the VM with
+ * (`PLATFORM_VM_LIFETIME_CEILING_SECONDS`), not the job cap — see
+ * `warm-pool.ts`'s `launchAndSuspendOne`.
+ */
+export function warmVmCanServeJob(params: {
+  startedAtMs: number;
+  nowMs: number;
+  capSeconds: number;
+  maxJobDurationSeconds: number;
+}): boolean {
+  const ageSeconds = (params.nowMs - params.startedAtMs) / 1000;
+  const remainingSeconds = params.capSeconds - ageSeconds;
+  return (
+    remainingSeconds >=
+    params.maxJobDurationSeconds + MAX_DURATION_GRACE_SECONDS
+  );
+}
+
 /** Parse the optional `EGRESS_CONNECTOR_ARNS` env var (JSON string array); absent/unset -> no egress connectors. */
 export function readEgressConnectors(): string[] {
   const raw = process.env.EGRESS_CONNECTOR_ARNS;
