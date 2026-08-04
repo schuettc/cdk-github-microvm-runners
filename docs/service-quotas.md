@@ -83,6 +83,25 @@ exceeds the quota and monopolizes the runner set until it exits.
 With `maxConcurrentVms` set above what the memory quota covers, the quota is
 what binds: launches past it fail with the error above and serialize.
 
+## When the quota is frozen: split by memory profile
+
+A quota increase is not always granted. On an account held at a low memory
+quota, the lever left is the size class — smaller VMs, so more of them fit
+under the same ceiling. But do not size a whole gate down on the assumption
+that it is uniformly small: measure each step's peak memory first, because a
+gate is often bimodal rather than big.
+
+One production gate, measured: strict mypy over 306 files peaked at 443 MB,
+while the pytest battery in the same gate peaked near 4 GiB. Sizing the whole
+gate down to `GB1` would have run the tests out of memory; keeping it whole on
+`GB4` made every lint-only run pay the big VM's footprint — and on that
+account's frozen 8 GB quota, a single `GB4` at ~16 GB actual monopolizes the
+runner set. The fix was two runner classes: lint and type-checking on `GB1`,
+tests on `GB4`, each job routed by its label. The small jobs then run two or
+three wide among themselves instead of competing for the big slots, and the
+repository gains a fast required check — about three minutes — alongside the
+long one.
+
 ## Running near capacity
 
 When the runner set is at `maxConcurrentVms`, or against the memory quota, a new
