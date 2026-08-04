@@ -37,7 +37,7 @@ junit.xml
 /dist/changelog.md
 /dist/version.txt
 !/.github/workflows/release.yml
-!/.github/workflows/upgrade-main.yml
+!/.github/workflows/upgrade-dev.yml
 !/.github/pull_request_template.md
 !/.prettierignore
 !/.prettierrc.json

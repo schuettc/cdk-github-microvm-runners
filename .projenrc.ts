@@ -1,4 +1,4 @@
-import { awscdk, javascript, JsonFile } from 'projen';
+import { awscdk, github, javascript, JsonFile } from 'projen';
 import { ReleaseTrigger } from 'projen/lib/release';
 import { hardenReleaseWorkflow } from './projenrc/harden-release-workflow';
 
@@ -102,6 +102,50 @@ const project = new awscdk.AwsCdkConstructLibrary({
           'perf',
         ],
       },
+    },
+  },
+
+  // The nightly dependency upgrade had failed every run since it was first
+  // scheduled — seven consecutive nights before anyone looked — always at the
+  // same step:
+  //
+  //   Create Pull Request  ##[error]Input 'token' not supplied.
+  //
+  // projen's default credential is a personal access token in a secret named
+  // PROJEN_GITHUB_TOKEN, and this repository has no secrets at all, so the
+  // upgrade job ran, resolved its upgrades, produced a patch, and then threw
+  // it away for want of a credential. Nothing surfaced it: a scheduled run
+  // that nobody watches fails silently.
+  //
+  // The built-in GITHUB_TOKEN is NOT the fix here, tempting as it looks.
+  // GitHub deliberately does not trigger workflows on a pull request opened
+  // with it, so `ci`, `build` and `Validate PR title` would never run — and
+  // all three are REQUIRED status checks on both `dev` and `main`. That
+  // swaps a loud nightly failure for an upgrade PR that opens and can then
+  // never be merged by anyone.
+  //
+  // A GitHub App token does trigger those workflows, and it does not expire
+  // the way a PAT does. It needs two secrets on the repository, PROJEN_APP_ID
+  // and PROJEN_APP_PRIVATE_KEY, from an app installed here; the token is
+  // minted per run and scoped to this repository only. Permissions are named
+  // explicitly rather than left at projen's default of "everything the app
+  // holds" — opening a pull request needs exactly these two.
+  depsUpgradeOptions: {
+    workflowOptions: {
+      projenCredentials: github.GithubCredentials.fromApp({
+        permissions: {
+          contents: github.workflows.AppPermission.WRITE,
+          pullRequests: github.workflows.AppPermission.WRITE,
+        },
+      }),
+
+      // Upgrades are a change like any other, so they enter through `dev` and
+      // reach production on a promotion. projen's default is every RELEASE
+      // branch, which here is `main` alone — that would have pointed the
+      // upgrade PR straight at production, skipping the soak that every
+      // hand-written change goes through. Generates upgrade-dev.yml and
+      // retires upgrade-main.yml.
+      branches: ['dev'],
     },
   },
 

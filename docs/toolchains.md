@@ -96,7 +96,11 @@ The version '3.12' with architecture 'arm64' was not found for this
 operating system
 ```
 
-Bake every Python version your workflows request.
+Bake every Python version your workflows request. That coverage is
+per-version, across every repository the runner set serves: an image baked
+with `3.12.7` for one repository fails another repository's
+`python-version: '3.11'` job at exactly this step, and the fix is baking
+`3.11.9` alongside, as the multi-version example above does.
 
 `actions/node-versions` does publish linux-arm64 builds, so `setup-node`
 downloads a Node version the image does not carry and the job runs on it. That
