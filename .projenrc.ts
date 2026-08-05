@@ -1,6 +1,7 @@
 import { awscdk, github, javascript, JsonFile } from 'projen';
 import { ReleaseTrigger } from 'projen/lib/release';
 import { hardenReleaseWorkflow } from './projenrc/harden-release-workflow';
+import { signUpgradeCommits } from './projenrc/sign-upgrade-commits';
 
 const project = new awscdk.AwsCdkConstructLibrary({
   name: 'cdk-github-microvm-runners',
@@ -504,3 +505,4 @@ project.synth();
 // part of synthesis means every route that synthesizes — the task, the gate,
 // CI — produces the same bytes.
 hardenReleaseWorkflow();
+signUpgradeCommits();
