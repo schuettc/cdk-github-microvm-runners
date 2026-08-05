@@ -359,6 +359,7 @@
             "npm-check-updates@20",
             "--upgrade",
             "--target=minor",
+            "--cooldown=1",
             "--peer",
             "--no-deprecated",
             "--dep=dev,prod,peer,optional",
@@ -409,7 +410,8 @@
             "undici",
             "yaml",
             "aws-cdk-lib",
-            "constructs"
+            "constructs",
+            "--config.minimum-release-age=1440"
           ]
         },
         {

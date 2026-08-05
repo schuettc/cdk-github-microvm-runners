@@ -51,6 +51,7 @@ junit.xml
 !/projenrc/tsconfig.json
 .jsii
 !/API.md
+!/.npmrc
 src/handlers/bundled/
 src/cli/bundled/
 docs/designs/
@@ -72,7 +73,6 @@ cdk.out/
 .doc-examples-check/
 .jsii.tabl.json
 .DS_Store
-!/.npmrc
 /skills/
 !/src/handlers/tsconfig.json
 !/.projenrc.ts
