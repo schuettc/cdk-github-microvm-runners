@@ -144,6 +144,29 @@ const project = new awscdk.AwsCdkConstructLibrary({
   // The app itself must also hold Workflows: Read and write — a token can only
   // narrow what the installation grants, never widen it.
   depsUpgradeOptions: {
+    // Never bump a range's floor onto a version younger than the supply-chain
+    // policy CI enforces. pnpm 10 rejects a lockfile holding anything
+    // published in the last 24 hours; without this, `ncu --upgrade` raised
+    // each range to the newest release regardless of age, so the upgrade
+    // produced a lockfile its own CI then refused:
+    //
+    //   [ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 21 lockfile entries failed
+    //   @aws-sdk/client-dynamodb@3.1103.0 was published at
+    //   2026-08-04T19:41:05Z, within the minimumReleaseAge cutoff
+    //
+    // Deterministic, not occasional: the upgrade runs at 00:00 UTC and the AWS
+    // SDK publishes every client daily at about 19:40 UTC, so the newest SDK
+    // is roughly four hours old on every run — always inside the window. Eight
+    // @aws-sdk packages are direct dependencies here, so every dependency PR
+    // was born red.
+    //
+    // With a cooldown, ncu falls back to the greatest version that clears the
+    // threshold instead of taking the newest. Matched to the policy's own 24h
+    // rather than a stricter invented number — the aim is "never propose what
+    // the policy would reject", not extra latency. Raise it if a wider
+    // blast-radius margin is ever wanted.
+    cooldown: 1,
+
     workflowOptions: {
       projenCredentials: github.GithubCredentials.fromApp({
         permissions: {
@@ -234,6 +257,31 @@ const project = new awscdk.AwsCdkConstructLibrary({
 // overridden after construction rather than through devDeps. Same reason as
 // the pin above: skylos cannot resolve the bare `^17`.
 project.addDevDeps('jest-junit@^17.0.0');
+
+// The second half of the cooldown fix above, and useless without it.
+//
+// `cooldown` governs what ncu writes into package.json RANGES; this governs
+// what pnpm RESOLVES inside them. The upgrade task runs `pnpm update` after
+// ncu, which otherwise takes the newest version satisfying the range — so a
+// range floored at a mature `^4.23.5` would still resolve to a same-day
+// `4.23.6` and land back in the rejected lockfile.
+//
+// The two must move together. This setting ALONE deadlocks the upgrade
+// (verified): ncu raises the floor onto the newest release, pnpm then refuses
+// it for being too young, and no version satisfies the range at all —
+//
+//   ERR_PNPM_NO_MATURE_MATCHING_VERSION  Version 4.23.6 (released 2 hours
+//   ago) of tsx does not meet the minimumReleaseAge constraint
+//
+// — which is a hard failure and no PR, strictly worse than a red one. With
+// `cooldown` in front of it the range is always satisfiable by a mature
+// version, and the two agree.
+//
+// pnpm applies a 24h floor when VERIFYING a lockfile whether or not this is
+// set; setting it explicitly is what extends the same floor to RESOLUTION.
+// It tightens resolution to the policy already in force — it does not relax
+// the check.
+project.npmrc.addConfig('minimum-release-age', '1440');
 
 // ts-node 10 cannot load TypeScript 6 (ts.sys is undefined under its
 // compiler shim); run the projenrc through tsx instead.
