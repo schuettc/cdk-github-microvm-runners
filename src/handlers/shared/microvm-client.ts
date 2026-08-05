@@ -356,7 +356,29 @@ function sendListMicrovmsWithRetry(
 }
 
 /**
- * List the `microvmId`s of every MicroVM whose `imageArn` equals `imageArn`
+ * A pooled (`SUSPENDED`) MicroVM and the moment the platform started it.
+ *
+ * `startedAtMs` is carried alongside the id because the platform's lifetime
+ * cap is measured from creation and cannot be changed afterwards
+ * (`ResumeMicrovm` takes only a `microvmIdentifier`, and the service has no
+ * `UpdateMicrovm`), so age is the only way to know what budget a pooled VM
+ * has left. See `remainingLifetimeSeconds`.
+ */
+export interface SuspendedVm {
+  /** The MicroVM's id. */
+  readonly microvmId: string;
+  /** `startedAt` as epoch milliseconds — when the platform's lifetime clock began. */
+  readonly startedAtMs: number;
+  /**
+   * The image version this VM booted from. The image Name, and therefore the
+   * ARN, is stable across rebuilds, so a pooled VM matching on ARN may still
+   * be carrying superseded content — this is what distinguishes them.
+   */
+  readonly imageVersion?: string;
+}
+
+/**
+ * List every MicroVM whose `imageArn` equals `imageArn`
  * AND whose `state` is `SUSPENDED` — the warm pool for that image. Paginates
  * the full account VM list client-side via `nextToken`, same shape as
  * `listRunnerSetVms` above (there is no server-side filter on `imageArn` or
@@ -369,8 +391,8 @@ function sendListMicrovmsWithRetry(
  */
 export async function listSuspendedVmsForImage(
   imageArn: string,
-): Promise<string[]> {
-  const result: string[] = [];
+): Promise<SuspendedVm[]> {
+  const result: SuspendedVm[] = [];
   let nextToken: string | undefined;
   do {
     // `imageIdentifier` is a SERVER-side filter, verified against the live
@@ -389,9 +411,22 @@ export async function listSuspendedVmsForImage(
       if (
         item.microvmId &&
         item.state === 'SUSPENDED' &&
-        item.imageArn === imageArn
+        item.imageArn === imageArn &&
+        item.startedAt
       ) {
-        result.push(item.microvmId);
+        // `startedAt` is required here, not incidental: the platform's
+        // lifetime clock runs from VM creation and keeps running while the VM
+        // is SUSPENDED, so a pooled VM's REMAINING budget is only knowable
+        // from this timestamp. A SUSPENDED VM without one cannot be shown to
+        // outlive a job, so it is excluded rather than guessed at — the same
+        // posture `getMicrovm` already takes (it treats a missing `startedAt`
+        // as "does not exist"). The sweep then replaces it and the janitor's
+        // orphan pass reaps it.
+        result.push({
+          microvmId: item.microvmId,
+          startedAtMs: item.startedAt.getTime(),
+          imageVersion: item.imageVersion,
+        });
       }
     }
     nextToken = res.nextToken;

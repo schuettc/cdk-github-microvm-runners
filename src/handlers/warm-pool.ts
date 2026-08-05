@@ -30,9 +30,10 @@
 import { emitEmf } from './shared/emf.js';
 import {
   allIngressConnectorArn,
-  MAX_DURATION_GRACE_SECONDS,
+  PLATFORM_VM_LIFETIME_CEILING_SECONDS,
   readEgressConnectors,
   resolveRuntimeLogging,
+  warmVmCanServeJob,
 } from './shared/launch-params.js';
 import {
   listSuspendedVmsForImage,
@@ -96,8 +97,26 @@ async function launchAndSuspendOne(imageArn: string): Promise<boolean> {
     microvmId = await runMicrovm({
       imageArn,
       executionRoleArn: runnerSetVmRoleArn,
-      maximumDurationInSeconds:
-        maxJobDurationSeconds + MAX_DURATION_GRACE_SECONDS,
+      // The PLATFORM CEILING, deliberately — not `maxJobDuration + grace`
+      // like the cold path uses.
+      //
+      // The lifetime clock starts here, at creation, and keeps running while
+      // the VM sits SUSPENDED in the pool; it cannot be re-armed on resume
+      // (`ResumeMicrovm` takes only a `microvmIdentifier`, and the service has
+      // no `UpdateMicrovm`). Capping a POOLED VM at the job budget therefore
+      // spends that budget on pool residency: a VM that waited 29 minutes was
+      // killed 62 seconds into its job, mid-run, with the job's step never
+      // completing. Under the job cap a pooled VM is only safe to claim while
+      // younger than `grace` — five minutes — which is not a pool.
+      //
+      // Creating at the ceiling makes the budget large enough that residency
+      // is affordable, and `warmVmCanServeJob` is what enforces "this VM can
+      // still outlive a full job" at claim time. The cost is that the
+      // PLATFORM's runaway-job guard is looser for a warm VM (8h from
+      // creation rather than the job budget from job start); the janitor's
+      // own lifetime sweep, keyed off the runner row rather than the VM, is
+      // the backstop that still bounds a hung job.
+      maximumDurationInSeconds: PLATFORM_VM_LIFETIME_CEILING_SECONDS,
       ingressNetworkConnectors: [allIngressConnectorArn(requireEnv)],
       egressNetworkConnectors: readEgressConnectors(),
       logging: resolveRuntimeLogging(readLogging, Boolean(runnerSetVmRoleArn)),
@@ -190,9 +209,66 @@ async function convergeLabel(
   imageArn: string,
   target: number,
   runnerSetId: string,
+  imageVersion?: string,
 ): Promise<void> {
   const suspended = await listSuspendedVmsForImage(imageArn);
-  const current = suspended.length;
+  const maxJobDurationSeconds = numEnv('MAX_JOB_DURATION_SECONDS');
+  const nowMs = Date.now();
+
+  // Split the pool into VMs that can still serve a full-length job and VMs
+  // that have aged past that. Counting the aged-out ones toward `current`
+  // would be the same bug one level up: the pool would report itself at
+  // target while every claim skipped its way to a cold boot, so the pool
+  // looks healthy and does nothing. They are retired here instead, which
+  // frees the launcher from ever seeing them and lets convergence refill the
+  // slot with a VM that has a full budget.
+  // Superseded content is retired on the same pass, for the same reason: the
+  // image Name is stable across rebuilds so the ARN is too, and a VM booted
+  // from an earlier version still matches on ARN. Left in the pool it would
+  // count toward target and serve jobs on the previous image after a deploy
+  // reported success. A VM whose version is unknown, or a runner set whose
+  // config predates versioned size classes, is left alone rather than
+  // destroyed on a guess.
+  const currentContent = (vm: { imageVersion?: string }): boolean =>
+    imageVersion === undefined ||
+    vm.imageVersion === undefined ||
+    vm.imageVersion === imageVersion;
+
+  const usable = suspended.filter(
+    (vm) =>
+      currentContent(vm) &&
+      warmVmCanServeJob({
+        startedAtMs: vm.startedAtMs,
+        nowMs,
+        capSeconds: PLATFORM_VM_LIFETIME_CEILING_SECONDS,
+        maxJobDurationSeconds,
+      }),
+  );
+  const expired = suspended.filter((vm) => !usable.includes(vm));
+
+  let retired = 0;
+  for (const vm of expired) {
+    try {
+      await terminateMicrovm(vm.microvmId);
+      retired += 1;
+    } catch (err) {
+      // Best-effort, exactly like the compensating terminate in
+      // `launchAndSuspendOne`: a VM left behind is picked up by the janitor's
+      // orphan pass, and failing the whole tick over it would stop
+      // convergence for every other VM in this label.
+      console.error(
+        JSON.stringify({
+          msg: 'warm-pool: failed to retire aged-out warm VM',
+          imageArn,
+          microvmId: vm.microvmId,
+          ageSeconds: Math.round((nowMs - vm.startedAtMs) / 1000),
+          err: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
+
+  const current = usable.length;
   const { launch } = planConvergence(current, target);
 
   let launched = 0;
@@ -213,6 +289,7 @@ async function convergeLabel(
       imageArn,
       target,
       current,
+      retired,
       launched,
       launchFailed,
     }),
@@ -246,7 +323,13 @@ export async function handler(): Promise<void> {
       continue;
     }
     try {
-      await convergeLabel(label, entry.imageArn, target, runnerSetId);
+      await convergeLabel(
+        label,
+        entry.imageArn,
+        target,
+        runnerSetId,
+        entry.imageVersion,
+      );
     } catch (err) {
       console.error(
         JSON.stringify({

@@ -129,13 +129,27 @@ const project = new awscdk.AwsCdkConstructLibrary({
   // and PROJEN_APP_PRIVATE_KEY, from an app installed here; the token is
   // minted per run and scoped to this repository only. Permissions are named
   // explicitly rather than left at projen's default of "everything the app
-  // holds" — opening a pull request needs exactly these two.
+  // holds".
+  //
+  // `workflows` is the non-obvious one, and it is not optional here. An
+  // upgrade re-runs synthesis, and projen pins third-party action versions
+  // inside the workflows it generates, so a dependency bump routinely rewrites
+  // files under .github/workflows/. GitHub refuses that push separately from
+  // `contents`:
+  //
+  //   ! [remote rejected] refusing to allow a GitHub App to create or update
+  //     workflow `.github/workflows/pull-request-lint.yml` without
+  //     `workflows` permission
+  //
+  // The app itself must also hold Workflows: Read and write — a token can only
+  // narrow what the installation grants, never widen it.
   depsUpgradeOptions: {
     workflowOptions: {
       projenCredentials: github.GithubCredentials.fromApp({
         permissions: {
           contents: github.workflows.AppPermission.WRITE,
           pullRequests: github.workflows.AppPermission.WRITE,
+          workflows: github.workflows.AppPermission.WRITE,
         },
       }),
 

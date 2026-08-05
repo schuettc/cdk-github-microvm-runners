@@ -54,8 +54,10 @@ import {
 import {
   allIngressConnectorArn,
   MAX_DURATION_GRACE_SECONDS,
+  PLATFORM_VM_LIFETIME_CEILING_SECONDS,
   readEgressConnectors,
   resolveRuntimeLogging,
+  warmVmCanServeJob,
 } from './shared/launch-params.js';
 import {
   createMicrovmAuthToken,
@@ -251,7 +253,7 @@ async function pushJitConfig(
  */
 function resolveMatchedSizeClass(
   labels: string[],
-): { label: string; imageArn: string } | undefined {
+): { label: string; imageArn: string; imageVersion?: string } | undefined {
   const sizeClasses = readSizeClasses();
   const labelSet = new Set(labels);
   let matched: string | undefined;
@@ -261,7 +263,11 @@ function resolveMatchedSizeClass(
     }
   }
   return matched
-    ? { label: matched, imageArn: sizeClasses[matched].imageArn }
+    ? {
+        label: matched,
+        imageArn: sizeClasses[matched].imageArn,
+        imageVersion: sizeClasses[matched].imageVersion,
+      }
     : undefined;
 }
 
@@ -719,6 +725,7 @@ function emitLaunchMetrics(params: {
 async function tryWarmPath(params: {
   label: string;
   imageArn: string;
+  imageVersion?: string;
   runnerName: string;
   repo: string;
   jobId: number;
@@ -764,7 +771,61 @@ async function tryWarmPath(params: {
   let jitConfigPushed = false;
   try {
     const candidates = await listSuspendedVmsForImage(params.imageArn);
-    for (const microvmId of candidates) {
+    for (const candidate of candidates) {
+      const { microvmId } = candidate;
+
+      // Never hand a job a VM built from superseded image content. The image
+      // Name is stable across rebuilds, so its ARN is too, and a pooled VM
+      // that predates the newest build still matches on ARN — it would run
+      // the job on the previous image while the deploy that replaced it
+      // reported success. Version equality is what actually says "same
+      // content"; the sweep retires these, and this covers the window
+      // between sweeps.
+      if (
+        params.imageVersion !== undefined &&
+        candidate.imageVersion !== undefined &&
+        candidate.imageVersion !== params.imageVersion
+      ) {
+        console.warn(
+          JSON.stringify({
+            msg: 'launcher: skipping warm VM built from a superseded image version',
+            microvmId,
+            vmImageVersion: candidate.imageVersion,
+            currentImageVersion: params.imageVersion,
+          }),
+        );
+        continue;
+      }
+
+      // Never hand a job a VM that cannot outlive it. The platform's lifetime
+      // clock started when the pool CREATED this VM and ran the whole time it
+      // sat SUSPENDED, and it cannot be re-armed on resume, so an old pooled
+      // VM accepts the job and then disappears part-way through — the runner
+      // vanishes, the step never completes, and nothing in this library logs
+      // anything, because nothing in this library terminated it. Skipping to
+      // a cold boot is strictly better: cold is slower to start and certain
+      // to finish.
+      if (
+        !warmVmCanServeJob({
+          startedAtMs: candidate.startedAtMs,
+          nowMs: params.nowMs,
+          capSeconds: PLATFORM_VM_LIFETIME_CEILING_SECONDS,
+          maxJobDurationSeconds: params.maxJobDurationSeconds,
+        })
+      ) {
+        console.warn(
+          JSON.stringify({
+            msg: 'launcher: skipping warm VM with insufficient remaining lifetime',
+            microvmId,
+            ageSeconds: Math.round(
+              (params.nowMs - candidate.startedAtMs) / 1000,
+            ),
+            maxJobDurationSeconds: params.maxJobDurationSeconds,
+          }),
+        );
+        continue;
+      }
+
       const won = await claimWarmVm({
         microvmId,
         nowMs: params.nowMs,
@@ -1150,6 +1211,7 @@ async function handleLaunch(message: LaunchMessage): Promise<void> {
     const warmResult = await tryWarmPath({
       label: matchedSizeClass.label,
       imageArn: matchedSizeClass.imageArn,
+      imageVersion: matchedSizeClass.imageVersion,
       runnerName,
       repo: message.repo,
       jobId: message.jobId,

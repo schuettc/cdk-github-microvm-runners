@@ -492,6 +492,60 @@ describe('launch: warm pool', () => {
     });
   }
 
+  /** Mocks a SUSPENDED candidate aged `ageSeconds` past the platform lifetime clock's start. */
+  function warmSuspendedListingAged(ageSeconds: number): void {
+    mvmMock.on(ListMicrovmsCommand).resolves({
+      items: [
+        {
+          microvmId: WARM_VM_ID,
+          state: 'SUSPENDED',
+          imageArn: IMAGE_ARN_DEFAULT,
+          imageVersion: '1',
+          startedAt: new Date(NOW_MS - ageSeconds * 1000),
+        },
+      ],
+    });
+  }
+
+  it('(a0) falls back to cold boot rather than claiming a warm VM that cannot outlive the job', async () => {
+    setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 3 }) });
+    // 28800 - 28000 = 800s remaining, short of the 3600 + 300 a full job
+    // needs. Claiming this VM is what killed a job 62 seconds in: the
+    // platform terminates it mid-run and nothing in this library logs it,
+    // because nothing in this library terminated it.
+    warmSuspendedListingAged(28_000);
+    const event = batchEvent([sqsRecord('m1', launchMessage())]);
+
+    const res = await handler(event, {} as never, undefined as never);
+
+    expect(res).toEqual({ batchItemFailures: [] });
+    // Never claimed — the skip happens BEFORE the claim, so the VM is not
+    // consumed and no compensating terminate is needed.
+    const claimCalls = ddbMock
+      .commandCalls(PutItemCommand)
+      .filter(
+        (c) => c.args[0].input.Item?.runnerName?.S === `warmvm#${WARM_VM_ID}`,
+      );
+    expect(claimCalls).toHaveLength(0);
+    expect(mvmMock.commandCalls(ResumeMicrovmCommand)).toHaveLength(0);
+    // Cold boot instead: slower to start, but certain to finish.
+    expect(mvmMock.commandCalls(RunMicrovmCommand)).toHaveLength(1);
+  });
+
+  it('(a1) still claims a warm VM that has aged but retains budget for a full job', async () => {
+    setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 3 }) });
+    // Two hours in the pool. Under the old job-budget cap this VM would have
+    // been dead for over an hour; under the platform ceiling it has 21600s
+    // left and is perfectly good.
+    warmSuspendedListingAged(7200);
+    const event = batchEvent([sqsRecord('m1', launchMessage())]);
+
+    await handler(event, {} as never, undefined as never);
+
+    expect(mvmMock.commandCalls(ResumeMicrovmCommand)).toHaveLength(1);
+    expect(mvmMock.commandCalls(RunMicrovmCommand)).toHaveLength(0);
+  });
+
   it('(a) resumes and injects an available warm VM when WARM_POOL_JSON targets the matched label — does not call RunMicrovm, writes the runner row', async () => {
     setEnv({ WARM_POOL_JSON: JSON.stringify({ microvm: 3 }) });
     warmSuspendedListing();

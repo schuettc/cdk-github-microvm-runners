@@ -260,23 +260,41 @@ runners.addRunnerClass('test', { size: MicrovmSize.GB4, image: heavyImage });
 
 ## How an image changes
 
-An image's identity is a content hash. For `RunnerImage.fromOptions()` it covers
-the rendered Dockerfile and a manifest of its assets, so editing any option above
-produces a different hash on the next deploy; for `RunnerImage.fromInline()` it
-covers the Dockerfile text you supplied, so editing a single line of it does the
-same.
+An image's **name** is fixed for the life of the runner class. Its **contents**
+are what change.
 
-What that means at deploy time depends on what changed:
+The build context — the rendered Dockerfile, any assets you supply, and the
+packaged in-VM agent — is uploaded as a content-hashed asset, so editing any
+option above, or a single line of an inline Dockerfile, changes what the image
+is built from. Leaving it alone changes nothing and the deploy is a no-op.
 
-- A change to the image's **assets alone** updates the image in place and adds a
-  version. The next launch picks up the newest version, while VMs already
-  running keep the version they booted from.
-- A change to the image's **specification** — packages, setup commands,
-  environment, toolchains, runner version — changes the hash, and with it the
-  image's name, so CloudFormation replaces the resource.
+Every such change **updates the image in place and adds a version**. The next
+launch picks up the newest version, while VMs already running keep the version
+they booted from, and the janitor prunes old versions as it sweeps. Nothing you
+can change about an image causes CloudFormation to replace it.
 
-Either way the change arrives through a normal `cdk deploy`, and the janitor
-prunes old image versions as it sweeps.
+That is deliberate, and it is why the name holds still. `Name` is the only
+property of the underlying resource whose change forces a replacement, and a
+replacement is the only way a deploy can fail with:
+
+```
+Resource handler returned message: "null already exists."
+                                    (HandlerErrorCode: AlreadyExists)
+```
+
+Image names are never reclaimed. When the name moved with the content, every
+version of the content a runner set had ever built left its name reserved in
+the account permanently — so reverting a change, downgrading the library,
+flipping an option back, or A/B-ing a toolchain could land on a name its own
+history already held, and the whole stack update rolled back. A fixed name
+removes that failure entirely rather than recovering from it.
+
+> **Upgrading from a version before this changed:** the first deploy after the
+> upgrade moves the image to its stable name, which replaces the image once.
+> That name has never been used, so it cannot collide. Later deploys never
+> replace the image again. The old content-hash-named images are left behind;
+> they are inert, and you can delete them with
+> `aws lambda-microvms delete-microvm-image --image-identifier <arn>`.
 
 Let that deploy finish. Interrupting the CLI — Ctrl-C, a dropped connection —
 stops the local process, while CloudFormation carries on server-side with the

@@ -795,12 +795,15 @@ describe('GithubMicrovmRunners: multiple runner classes', () => {
       Object.entries(fns).find(([id]) => id.includes('LauncherFunction')) ?? [];
     const sizeClassesJsonValue =
       launcherFn!.Properties.Environment.Variables.SIZE_CLASSES_JSON;
-    // Not a plain string: it's built from `ImagePipeline.imageArn` tokens
-    // (Fn::GetAtt), so CDK must render it as an Fn::Join carrying real
-    // attribute references, one per runner class.
+    // Not a plain string: it's built from `ImagePipeline` tokens (Fn::GetAtt),
+    // so CDK must render it as an Fn::Join carrying real attribute
+    // references — two per runner class, the image's arn and its current
+    // version, the latter being how the warm path rejects a pooled VM built
+    // from superseded content now that the arn is stable across rebuilds.
     expect(typeof sizeClassesJsonValue).not.toBe('string');
     const serialized = JSON.stringify(sizeClassesJsonValue);
-    expect(serialized.match(/Fn::GetAtt/g)?.length).toBe(2);
+    expect(serialized.match(/Fn::GetAtt/g)?.length).toBe(4);
+    expect(getAttImageResources(sizeClassesJsonValue)).toHaveLength(2);
   });
 
   it('defaults IMAGE_ARN to the "microvm" class when present', () => {
@@ -1785,6 +1788,17 @@ function getAttLogicalIds(resolved: unknown): string[] {
   ].map((m) => m[1]);
 }
 
+/**
+ * The DISTINCT image resources referenced by a resolved value. Each size class
+ * contributes two GetAtts to SIZE_CLASSES_JSON — `ImageArn` and
+ * `LatestActiveImageVersion` — off the same resource, so counting raw GetAtts
+ * double-counts images. These assertions are about how many distinct images a
+ * runner set builds.
+ */
+function getAttImageResources(resolved: unknown): string[] {
+  return [...new Set(getAttLogicalIds(resolved))];
+}
+
 function launcherEnv(template: Template): Record<string, unknown> {
   const fns = template.findResources('AWS::Lambda::Function');
   const [, launcherFn] =
@@ -1825,7 +1839,7 @@ describe('GithubMicrovmRunners: addRunnerClass registry', () => {
     // Token-carrying (Fn::Join over the per-class imageArn Fn::GetAtt refs),
     // not a plain string.
     expect(typeof sizeClassesJson).not.toBe('string');
-    const ids = getAttLogicalIds(sizeClassesJson);
+    const ids = getAttImageResources(sizeClassesJson);
     expect(ids).toHaveLength(2);
     expect(ids[0]).not.toBe(ids[1]);
     // Both labels appear as literal JSON keys in the join's string parts.
@@ -1890,9 +1904,10 @@ describe('GithubMicrovmRunners: addRunnerClass registry', () => {
     ).toHaveLength(1);
     expect(rc.imagePipeline).toBeDefined();
     expect(rc.imageArn).toBeDefined();
-    // The single class's image arn is the sole Fn::GetAtt in SIZE_CLASSES_JSON.
+    // The single class's image is the sole resource SIZE_CLASSES_JSON refers
+    // to (twice: its arn and its current version).
     expect(
-      getAttLogicalIds(launcherEnv(template).SIZE_CLASSES_JSON),
+      getAttImageResources(launcherEnv(template).SIZE_CLASSES_JSON),
     ).toHaveLength(1);
   });
 
