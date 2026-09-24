@@ -114,7 +114,7 @@ RUN useradd -m runner
 
 # The GitHub Actions runner, where the agent looks for it.
 RUN mkdir -p /opt/runner && cd /opt/runner \
-  && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.335.1/actions-runner-linux-arm64-2.335.1.tar.gz \
+  && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-arm64-2.337.0.tar.gz \
   && tar xzf r.tgz && rm r.tgz && chown -R runner:runner /opt/runner
 
 # Staged into the build context by the construct.
@@ -150,7 +150,7 @@ FROM public.ecr.aws/lambda/microvms:al2023-minimal
 RUN dnf install -y nodejs22 sudo shadow-utils tar git jq && dnf clean all
 RUN useradd -m runner
 RUN mkdir -p /opt/runner && cd /opt/runner \\
- && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.335.1/actions-runner-linux-arm64-2.335.1.tar.gz \\
+ && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-arm64-2.337.0.tar.gz \\
  && tar xzf r.tgz && rm r.tgz && chown -R runner:runner /opt/runner
 
 COPY microvm-runner/agent.mjs /opt/microvm-runner/agent.mjs
