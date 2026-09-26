@@ -2287,6 +2287,102 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
       EvaluationPeriods: 2,
     });
   });
+
+  it('stuckRunnersReapedAlarm fires at >=6 over one 15-minute period, missing data not breaching', () => {
+    // A refused runner version drove stuckRunnersReaped to 14-28/h against a
+    // month-long baseline of <=3/h; a >=6 sum over a single 15-minute period
+    // clears that baseline and fires ~15 min into the incident.
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.stuckRunnersReapedAlarm(stack);
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'stuckRunnersReaped',
+      Namespace: 'MicrovmRunners',
+      Statistic: 'Sum',
+      Threshold: 6,
+      EvaluationPeriods: 1,
+      Period: 900,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+    });
+  });
+
+  it('stuckRunnersReapedAlarm honours option overrides', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.stuckRunnersReapedAlarm(stack, {
+      threshold: 10,
+      evaluationPeriods: 2,
+      period: Duration.minutes(5),
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Threshold: 10,
+      EvaluationPeriods: 2,
+      Period: 300,
+    });
+  });
+
+  it('capacityRejectedAlarm fires at >=1 over three 5-minute periods for its class', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.capacityRejectedAlarm(stack, 'microvm');
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'CapacityRejected',
+      Namespace: 'MicrovmRunners',
+      Statistic: 'Sum',
+      Threshold: 1,
+      EvaluationPeriods: 3,
+      Period: 300,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+      Dimensions: Match.arrayWith([{ Name: 'SizeClass', Value: 'microvm' }]),
+    });
+  });
+
+  it('capacityRejectedAlarm uses a construct id unique per class label, so two classes give two alarms in one scope', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.capacityRejectedAlarm(stack, 'small');
+    runners.metrics.capacityRejectedAlarm(stack, 'large');
+    const alarms = Template.fromStack(stack).findResources(
+      'AWS::CloudWatch::Alarm',
+    );
+    expect(Object.keys(alarms).length).toBe(2);
+    const classes = Object.values(alarms).flatMap((a) =>
+      a.Properties.Dimensions.filter(
+        (d: { Name: string }) => d.Name === 'SizeClass',
+      ).map((d: { Value: string }) => d.Value),
+    );
+    expect(classes.sort()).toEqual(['large', 'small']);
+  });
+
+  it('capacityRejectedAlarm honours option overrides', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.capacityRejectedAlarm(stack, 'microvm', {
+      threshold: 4,
+      evaluationPeriods: 1,
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Threshold: 4,
+      EvaluationPeriods: 1,
+    });
+  });
 });
 
 describe('GithubMicrovmRunners: emitMetrics opt-in gate', () => {
@@ -2375,6 +2471,28 @@ describe('GithubMicrovmRunners: emitMetrics opt-in gate', () => {
     );
   });
 
+  it('stuckRunnersReapedAlarm throws when metrics are off, naming the prop and the metric', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', minimalProps(stack));
+    expect(() => runners.metrics.stuckRunnersReapedAlarm(stack)).toThrow(
+      /stuckRunnersReapedAlarm\(\) requires emitMetrics: true/,
+    );
+    expect(() => runners.metrics.stuckRunnersReapedAlarm(stack)).toThrow(
+      /`stuckRunnersReaped`/,
+    );
+  });
+
+  it('capacityRejectedAlarm throws when metrics are off, naming the prop and the metric', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', minimalProps(stack));
+    expect(() =>
+      runners.metrics.capacityRejectedAlarm(stack, 'microvm'),
+    ).toThrow(/capacityRejectedAlarm\(\) requires emitMetrics: true/);
+    expect(() =>
+      runners.metrics.capacityRejectedAlarm(stack, 'microvm'),
+    ).toThrow(/`CapacityRejected`/);
+  });
+
   it('both EMF-backed alarms succeed with emitMetrics: true', () => {
     const stack = newStack();
     const runners = mkRunners(stack, 'Runners', {
@@ -2384,6 +2502,10 @@ describe('GithubMicrovmRunners: emitMetrics opt-in gate', () => {
     expect(() => runners.metrics.sweepErrorsAlarm(stack)).not.toThrow();
     expect(() =>
       runners.metrics.stuckLaunchesRecoveredAlarm(stack),
+    ).not.toThrow();
+    expect(() => runners.metrics.stuckRunnersReapedAlarm(stack)).not.toThrow();
+    expect(() =>
+      runners.metrics.capacityRejectedAlarm(stack, 'microvm'),
     ).not.toThrow();
   });
 

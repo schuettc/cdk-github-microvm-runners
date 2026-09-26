@@ -800,6 +800,76 @@ export class GithubMicrovmRunnersMetrics {
   }
 
   /**
+   * Alarm when the janitor is reaping stuck runners in volume, the signal a
+   * refused runner version leaves. A stuck runner is one that registered with
+   * GitHub and then sat idle past `idleRunnerGraceSeconds`, reaped once a
+   * second sweep saw it the same way; a healthy runner set reaps the odd one.
+   *
+   * The threshold comes from an incident. On 2026-09-24 GitHub refused a stale
+   * runner version, so every launched runner registered and then went nowhere;
+   * `stuckRunnersReaped` ran 14–28 an hour for about six hours, peaking at
+   * 8–10 in a single five-minute sweep, against a month-long baseline that
+   * never exceeded 3 in any hour. The three ready-made alarms already on this
+   * class stayed OK throughout — nothing else caught it. A sum of 6 or more
+   * over one fifteen-minute period sits well above that baseline (≤0.75 per
+   * quarter-hour) and well below the incident's rate, so it fires about
+   * fifteen minutes into a refusal and stays quiet otherwise; pass
+   * `RunnerAlarmOptions` to change the threshold, window, or count.
+   *
+   * Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+   * without it.
+   * @default threshold 6, 1 evaluation period, 15-minute period
+   */
+  public stuckRunnersReapedAlarm(
+    scope: Construct,
+    options: RunnerAlarmOptions = {},
+  ): cloudwatch.Alarm {
+    this.requireEmittedMetrics('stuckRunnersReapedAlarm', 'stuckRunnersReaped');
+    return this.buildAlarm(
+      scope,
+      'StuckRunnersReapedAlarm',
+      this.stuckRunnersReaped(),
+      'MicroVM runner set: janitor is reaping stuck runners in volume (GitHub refusing the runner version?).',
+      { period: Duration.minutes(15), ...options },
+      6,
+    );
+  }
+
+  /**
+   * Alarm when the MicroVM service is rejecting a runner class's launches for
+   * capacity — the class's quota signal. Each rejection is a job queueing
+   * behind the account's MicroVM memory quota or the set's `maxConcurrentVms`
+   * rather than running, and spends one of its `maxReceiveCount` redrives on
+   * the way to the dead-letter queue. It fires on one rejection in each of
+   * three consecutive 5-minute periods, so a lone burst that the next launch
+   * clears does not page; pass `RunnerAlarmOptions` to change that. See
+   * docs/service-quotas.md for raising the ceiling.
+   *
+   * `capacityRejected` is dimensioned per runner class, so this builds one
+   * alarm per `runnerClassLabel` under an id unique to that label — call it
+   * once per class you want watched, in the same scope, without collision.
+   *
+   * Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+   * without it.
+   * @default threshold 1, 3 evaluation periods, 5-minute period
+   */
+  public capacityRejectedAlarm(
+    scope: Construct,
+    runnerClassLabel: string,
+    options: RunnerAlarmOptions = {},
+  ): cloudwatch.Alarm {
+    this.requireEmittedMetrics('capacityRejectedAlarm', 'CapacityRejected');
+    return this.buildAlarm(
+      scope,
+      `CapacityRejectedAlarm-${runnerClassLabel}`,
+      this.capacityRejected(runnerClassLabel),
+      `MicroVM runner set: launches for class '${runnerClassLabel}' are being rejected for capacity (MicroVM quota or maxConcurrentVms reached).`,
+      { evaluationPeriods: 3, ...options },
+      1,
+    );
+  }
+
+  /**
    * Guard for the alarms whose metric is EMF-emitted by a handler. With
    * `GithubMicrovmRunnersProps.emitMetrics` off the handlers write no
    * metric at all, and these alarms use

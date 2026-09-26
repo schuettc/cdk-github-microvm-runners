@@ -2524,6 +2524,7 @@ Whether the runner set reports the metrics this class names, which is `GithubMic
 | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.cancelledBeforeLaunch">cancelledBeforeLaunch</a></code> | Launches skipped because the job had already stopped waiting for a runner by the time the launch was processed — cancelled, or its run deleted. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.capacityRejected">capacityRejected</a></code> | Launches the MicroVM service rejected for capacity. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.capacityRejectedAlarm">capacityRejectedAlarm</a></code> | Alarm when the MicroVM service is rejecting a runner class's launches for capacity — the class's quota signal. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.coldBoot">coldBoot</a></code> | Launches served by booting a new VM, because no warm VM was available or the class keeps no warm pool. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.coldSpinUpMs">coldSpinUpMs</a></code> | Milliseconds to spin up a cold launch: starting the VM, waiting for it to boot, and pushing the runner's registration. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.deadLetterQueueDepth">deadLetterQueueDepth</a></code> | Messages sitting in the dead-letter queue: a launch or terminate intent SQS gave up redriving. |
@@ -2540,6 +2541,7 @@ Whether the runner set reports the metrics this class names, which is `GithubMic
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckLaunchesRecovered">stuckLaunchesRecovered</a></code> | Janitor sweep count: dead-lettered launches re-driven onto the job queue, which is 0 unless `recoverStuckLaunches` is on. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckLaunchesRecoveredAlarm">stuckLaunchesRecoveredAlarm</a></code> | Alarm on stuck-launch recoveries, the dead-lettered launches the janitor re-drove, which only happens with `recoverStuckLaunches` on. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckRunnersReaped">stuckRunnersReaped</a></code> | Janitor sweep count: runners that registered with GitHub and then sat idle past `idleRunnerGraceSeconds`, reaped once a second sweep has seen them the same way. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckRunnersReapedAlarm">stuckRunnersReapedAlarm</a></code> | Alarm when the janitor is reaping stuck runners in volume, the signal a refused runner version leaves. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.suspectsCleared">suspectsCleared</a></code> | Janitor sweep count: VMs an earlier sweep had marked as suspect, cleared because this sweep found them accounted for or working again. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.sweepErrorsAlarm">sweepErrorsAlarm</a></code> | Alarm on janitor sweep errors, the per-item failures a sweep isolates and continues past. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.tableRowsCleaned">tableRowsCleaned</a></code> | Janitor sweep count: runner table rows deleted, either because the VM they name is confirmed gone or because a real row superseded an orphaned one. |
@@ -2599,6 +2601,47 @@ the way to the dead-letter queue. See docs/service-quotas.md.
 ###### `runnerClassLabel`<sup>Required</sup> <a name="runnerClassLabel" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.capacityRejected.parameter.runnerClassLabel"></a>
 
 - *Type:* string
+
+---
+
+##### `capacityRejectedAlarm` <a name="capacityRejectedAlarm" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.capacityRejectedAlarm"></a>
+
+```typescript
+public capacityRejectedAlarm(scope: Construct, runnerClassLabel: string, options?: RunnerAlarmOptions): Alarm
+```
+
+Alarm when the MicroVM service is rejecting a runner class's launches for capacity — the class's quota signal.
+
+Each rejection is a job queueing
+behind the account's MicroVM memory quota or the set's `maxConcurrentVms`
+rather than running, and spends one of its `maxReceiveCount` redrives on
+the way to the dead-letter queue. It fires on one rejection in each of
+three consecutive 5-minute periods, so a lone burst that the next launch
+clears does not page; pass `RunnerAlarmOptions` to change that. See
+docs/service-quotas.md for raising the ceiling.
+
+`capacityRejected` is dimensioned per runner class, so this builds one
+alarm per `runnerClassLabel` under an id unique to that label — call it
+once per class you want watched, in the same scope, without collision.
+
+Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+without it.
+
+###### `scope`<sup>Required</sup> <a name="scope" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.capacityRejectedAlarm.parameter.scope"></a>
+
+- *Type:* constructs.Construct
+
+---
+
+###### `runnerClassLabel`<sup>Required</sup> <a name="runnerClassLabel" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.capacityRejectedAlarm.parameter.runnerClassLabel"></a>
+
+- *Type:* string
+
+---
+
+###### `options`<sup>Optional</sup> <a name="options" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.capacityRejectedAlarm.parameter.options"></a>
+
+- *Type:* <a href="#cdk-github-microvm-runners.RunnerAlarmOptions">RunnerAlarmOptions</a>
 
 ---
 
@@ -2818,6 +2861,44 @@ public stuckRunnersReaped(): Metric
 ```
 
 Janitor sweep count: runners that registered with GitHub and then sat idle past `idleRunnerGraceSeconds`, reaped once a second sweep has seen them the same way.
+
+##### `stuckRunnersReapedAlarm` <a name="stuckRunnersReapedAlarm" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckRunnersReapedAlarm"></a>
+
+```typescript
+public stuckRunnersReapedAlarm(scope: Construct, options?: RunnerAlarmOptions): Alarm
+```
+
+Alarm when the janitor is reaping stuck runners in volume, the signal a refused runner version leaves.
+
+A stuck runner is one that registered with
+GitHub and then sat idle past `idleRunnerGraceSeconds`, reaped once a
+second sweep saw it the same way; a healthy runner set reaps the odd one.
+
+The threshold comes from an incident. On 2026-09-24 GitHub refused a stale
+runner version, so every launched runner registered and then went nowhere;
+`stuckRunnersReaped` ran 14–28 an hour for about six hours, peaking at
+8–10 in a single five-minute sweep, against a month-long baseline that
+never exceeded 3 in any hour. The three ready-made alarms already on this
+class stayed OK throughout — nothing else caught it. A sum of 6 or more
+over one fifteen-minute period sits well above that baseline (≤0.75 per
+quarter-hour) and well below the incident's rate, so it fires about
+fifteen minutes into a refusal and stays quiet otherwise; pass
+`RunnerAlarmOptions` to change the threshold, window, or count.
+
+Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+without it.
+
+###### `scope`<sup>Required</sup> <a name="scope" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckRunnersReapedAlarm.parameter.scope"></a>
+
+- *Type:* constructs.Construct
+
+---
+
+###### `options`<sup>Optional</sup> <a name="options" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckRunnersReapedAlarm.parameter.options"></a>
+
+- *Type:* <a href="#cdk-github-microvm-runners.RunnerAlarmOptions">RunnerAlarmOptions</a>
+
+---
 
 ##### `suspectsCleared` <a name="suspectsCleared" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.suspectsCleared"></a>
 

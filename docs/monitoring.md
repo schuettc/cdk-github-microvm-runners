@@ -92,7 +92,7 @@ each reports an absolute value; the rest are sums.
 
 ## Ready-made alarms
 
-Three methods build a `cloudwatch.Alarm` carrying a default threshold. An alarm
+Five methods build a `cloudwatch.Alarm` carrying a default threshold. An alarm
 exists where you call one and give it a scope:
 
 ```ts
@@ -128,15 +128,37 @@ launches often enough to need it. Treat a persistently high count as a signal to
 find that cause, not as a healthy steady state. Setting the property to false
 silences the counter along with the recovery itself.
 
-Those two read metrics the handlers emit, so they require `emitMetrics: true`
+`stuckRunnersReapedAlarm` watches the janitor's `stuckRunnersReaped` counter —
+runners that registered with GitHub and then went nowhere, reaped once a second
+sweep saw them idle past `idleRunnerGraceSeconds`. It is the alarm for a refused
+runner version (see below): it fires on a sum of 6 or more over a single
+15-minute period, well above the handful a healthy set reaps and well below the
+rate a refusal drives.
+
+`capacityRejectedAlarm(scope, label)` watches one runner class's
+`capacityRejected` counter — launches the MicroVM service turned away for
+capacity, each a job queueing behind the account's memory quota or the set's
+`maxConcurrentVms` rather than running. It fires on one rejection in each of
+three consecutive 5-minute periods, so a lone burst the next launch clears does
+not page. It is per class, so it takes the class label and builds its alarm
+under an id unique to that label — call it once for each class you want
+watched, in the same scope, and the alarms do not collide:
+
+```ts
+runners.metrics.capacityRejectedAlarm(stack, 'small');
+runners.metrics.capacityRejectedAlarm(stack, 'large');
+```
+
+Those four read metrics the handlers emit, so they require `emitMetrics: true`
 and throw at synth without it.
 
 Each takes an optional `RunnerAlarmOptions { threshold?, evaluationPeriods?,
 period? }`. The defaults are `threshold: 1`, `evaluationPeriods: 1` — 3 for the
-sweep-errors and stuck-launch alarms, both of which watch signals that only
-mean something when they persist — and `period: Duration.minutes(5)`, compared
-with `>=`, with missing data treated as not breaching. Pass any of the three to
-change it:
+sweep-errors, stuck-launch, and capacity-rejected alarms, all of which watch
+signals that only mean something when they persist — and
+`period: Duration.minutes(5)`, except `stuckRunnersReapedAlarm`, which defaults
+to `threshold: 6` over `Duration.minutes(15)`. All compare with `>=` and treat
+missing data as not breaching. Pass any of the three to change it:
 
 ```ts
 runners.metrics.sweepErrorsAlarm(stack, {
@@ -146,7 +168,32 @@ runners.metrics.sweepErrorsAlarm(stack, {
 ```
 
 Each builds its alarm under a fixed construct id, so call a given one once per
-scope.
+scope — except `capacityRejectedAlarm`, whose id carries the class label, so
+it is called once per class instead.
+
+## What a refused runner looks like
+
+GitHub can refuse a runner version — a runner that registers with a version
+GitHub has stopped accepting is told to update and never picks up a job. The
+launcher keeps launching, each VM registers, sits idle, and is reaped, and jobs
+pile up behind runners that are present but useless.
+
+It is a quiet failure. Nothing errors: launches succeed, registrations succeed,
+the janitor sweeps cleanly. On 2026-09-24 a refused version drove
+`stuckRunnersReaped` to 14–28 an hour for about six hours, peaking at 8–10 in a
+single five-minute sweep, against a month-long baseline that never exceeded 3
+in any hour — and the dead-letter, sweep-errors, and stuck-launch alarms all
+stayed OK the whole time, because none of them watches this. `stuckRunnersReaped`
+rising is the signal, which is what `stuckRunnersReapedAlarm` is for:
+
+```ts
+runners.metrics.stuckRunnersReapedAlarm(stack);
+```
+
+A sustained climb here means the runners this set launches are being turned
+away. Check the runner version the set builds into its image against the
+version GitHub currently requires, and roll the image forward if it has fallen
+behind.
 
 ## Building your own
 
