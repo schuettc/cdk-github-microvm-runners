@@ -1789,7 +1789,7 @@ public readonly runnerVersion: RunnerVersion;
 ```
 
 - *Type:* <a href="#cdk-github-microvm-runners.RunnerVersion">RunnerVersion</a>
-- *Default:* RunnerVersion.latest()
+- *Default:* RunnerVersion.libraryDefault()
 
 `actions/runner` release to install.
 
@@ -3816,11 +3816,12 @@ const pinnedImage = RunnerImage.fromOptions({
 | **Name** | **Description** |
 | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.RunnerVersion.latest">latest</a></code> | Use the `actions/runner` release this library currently pins (`DEFAULT_RUNNER_VERSION`). |
+| <code><a href="#cdk-github-microvm-runners.RunnerVersion.libraryDefault">libraryDefault</a></code> | Use the `actions/runner` release this library currently pins (`DEFAULT_RUNNER_VERSION`). |
 | <code><a href="#cdk-github-microvm-runners.RunnerVersion.of">of</a></code> | Pin an explicit `actions/runner` release, e.g. `"2.319.1"`. |
 
 ---
 
-##### `latest` <a name="latest" id="cdk-github-microvm-runners.RunnerVersion.latest"></a>
+##### ~~`latest`~~ <a name="latest" id="cdk-github-microvm-runners.RunnerVersion.latest"></a>
 
 ```typescript
 import { RunnerVersion } from 'cdk-github-microvm-runners'
@@ -3830,13 +3831,35 @@ RunnerVersion.latest()
 
 Use the `actions/runner` release this library currently pins (`DEFAULT_RUNNER_VERSION`).
 
-No version is carried on the instance; the
-image build fills the pinned value in at synth.
-
 *Example*
 
 ```typescript
 const runnerVersion = RunnerVersion.latest();
+```
+
+
+##### `libraryDefault` <a name="libraryDefault" id="cdk-github-microvm-runners.RunnerVersion.libraryDefault"></a>
+
+```typescript
+import { RunnerVersion } from 'cdk-github-microvm-runners'
+
+RunnerVersion.libraryDefault()
+```
+
+Use the `actions/runner` release this library currently pins (`DEFAULT_RUNNER_VERSION`).
+
+No version is carried on the instance; the
+image build fills the pinned value in at synth.
+
+This is the library's pinned default, not GitHub's latest release. The
+library bumps the pin as releases ship, because GitHub stops queuing jobs
+to a runner more than 30 days behind the newest release; see "Keeping the
+runner current" in `docs/images.md`.
+
+*Example*
+
+```typescript
+const runnerVersion = RunnerVersion.libraryDefault();
 ```
 
 
@@ -3867,7 +3890,7 @@ const pinnedRunner = RunnerVersion.of('2.328.0');
 
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
-| <code><a href="#cdk-github-microvm-runners.RunnerVersion.property.version">version</a></code> | <code>string</code> | The pinned release, for a version built with `RunnerVersion.of()`. `undefined` for `RunnerVersion.latest()`. |
+| <code><a href="#cdk-github-microvm-runners.RunnerVersion.property.version">version</a></code> | <code>string</code> | The pinned release, for a version built with `RunnerVersion.of()`. `undefined` for `RunnerVersion.libraryDefault()`. |
 
 ---
 
@@ -3879,7 +3902,7 @@ public readonly version: string;
 
 - *Type:* string
 
-The pinned release, for a version built with `RunnerVersion.of()`. `undefined` for `RunnerVersion.latest()`.
+The pinned release, for a version built with `RunnerVersion.of()`. `undefined` for `RunnerVersion.libraryDefault()`.
 
 ---
 

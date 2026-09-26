@@ -114,7 +114,7 @@ RUN useradd -m runner
 
 # The GitHub Actions runner, where the agent looks for it.
 RUN mkdir -p /opt/runner && cd /opt/runner \
-  && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.335.1/actions-runner-linux-arm64-2.335.1.tar.gz \
+  && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-arm64-2.337.0.tar.gz \
   && tar xzf r.tgz && rm r.tgz && chown -R runner:runner /opt/runner
 
 # Staged into the build context by the construct.
@@ -150,7 +150,7 @@ FROM public.ecr.aws/lambda/microvms:al2023-minimal
 RUN dnf install -y nodejs22 sudo shadow-utils tar git jq && dnf clean all
 RUN useradd -m runner
 RUN mkdir -p /opt/runner && cd /opt/runner \\
- && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.335.1/actions-runner-linux-arm64-2.335.1.tar.gz \\
+ && curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-arm64-2.337.0.tar.gz \\
  && tar xzf r.tgz && rm r.tgz && chown -R runner:runner /opt/runner
 
 COPY microvm-runner/agent.mjs /opt/microvm-runner/agent.mjs
@@ -233,6 +233,48 @@ until the janitor reaps the VM. Everything is green except the job.
 
 If a custom image takes jobs but never runs them, that is where to look
 first.
+
+## Keeping the runner current
+
+GitHub requires a self-hosted runner to install each new `actions/runner`
+release within **30 days** of its publication. Past that window GitHub stops
+queuing jobs to the runner, and registration itself needs at least `2.329.0`.
+The rule and its enforcement timeline are in GitHub's
+[changelog](https://github.blog/changelog/2026-06-12-github-actions-minimum-version-enforcement-timeline-for-self-hosted-runners/).
+
+The library pins a default release and installs it on every image that does not
+ask for a specific one. That pin is what `RunnerVersion.libraryDefault()`
+selects — it is the library's default, **not** GitHub's latest release, which is
+why the older `RunnerVersion.latest()` is deprecated: it never fetched anything
+latest, it only ever returned this same pin. Pin an explicit release with
+`RunnerVersion.of()`:
+
+```ts
+RunnerImage.fromOptions({
+  runnerVersion: RunnerVersion.of('2.337.0'),
+});
+```
+
+### What falling behind looks like
+
+A VM whose runner is too old to be queued work still **boots, registers, and
+appears online for a moment** — the runner connects to GitHub outbound and
+looks healthy. GitHub simply never hands it a job, so it sits idle, GitHub
+marks it offline, and the janitor reaps it as a runner GitHub lost track of.
+The signature is a rising `stuckRunnersReaped()` — registered runners GitHub
+no longer knows about, reaped as idle — while jobs pile up queued against
+runners that will never take them. See
+[Monitoring](monitoring.md) for that metric and its alarm.
+
+### What to do
+
+Bump the pin and redeploy: either move the whole library forward to a release
+whose default is current, or pin a newer release with
+`RunnerVersion.of('<newer>')` on the affected images. Either change ships on the
+next `cdk deploy` as a new image version, which the next launch picks up (see
+[How an image changes](#how-an-image-changes)). To catch this before GitHub
+does, watch the version and alarm on the reaping signature — both are covered in
+[Monitoring](monitoring.md).
 
 ## Sharing an image across runner classes
 

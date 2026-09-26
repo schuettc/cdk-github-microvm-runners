@@ -14,6 +14,25 @@ export class RunnerVersion {
    * (`DEFAULT_RUNNER_VERSION`). No version is carried on the instance; the
    * image build fills the pinned value in at synth.
    *
+   * This is the library's pinned default, not GitHub's latest release. The
+   * library bumps the pin as releases ship, because GitHub stops queuing jobs
+   * to a runner more than 30 days behind the newest release; see "Keeping the
+   * runner current" in `docs/images.md`.
+   *
+   * @example
+   * const runnerVersion = RunnerVersion.libraryDefault();
+   */
+  public static libraryDefault(): RunnerVersion {
+    return new RunnerVersion(undefined);
+  }
+
+  /**
+   * Use the `actions/runner` release this library currently pins
+   * (`DEFAULT_RUNNER_VERSION`).
+   *
+   * @deprecated returns the library's pinned default, not GitHub's latest
+   * release; use `libraryDefault()` or `of()`.
+   *
    * @example
    * const runnerVersion = RunnerVersion.latest();
    */
@@ -34,7 +53,7 @@ export class RunnerVersion {
   private constructor(
     /**
      * The pinned release, for a version built with `RunnerVersion.of()`.
-     * `undefined` for `RunnerVersion.latest()`.
+     * `undefined` for `RunnerVersion.libraryDefault()`.
      */
     public readonly version?: string,
   ) {}
