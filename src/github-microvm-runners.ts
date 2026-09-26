@@ -1,7 +1,14 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ArnFormat, Duration, Lazy, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import {
+  Annotations,
+  ArnFormat,
+  Duration,
+  Lazy,
+  RemovalPolicy,
+  Stack,
+} from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -18,7 +25,7 @@ import { ImagePipeline } from './image/image-pipeline.js';
 import { RunnerImage } from './image/runner-image.js';
 import { validateRegion } from './regions.js';
 import type { ConsoleLogs } from './types/console-logs.js';
-import type { GithubAuth } from './types/github-auth.js';
+import { GithubAuthKind, type GithubAuth } from './types/github-auth.js';
 import type { MicrovmIdlePolicy } from './types/idle-policy.js';
 import type { ImageLogs } from './types/image-logs.js';
 import type { RunnerClass, RunnerClassProps } from './types/runner-class.js';
@@ -489,6 +496,25 @@ export class GithubMicrovmRunnersMetrics {
      * either way; only the two alarms over those metrics refuse to synthesize.
      */
     private readonly emitMetrics: boolean = false,
+    /**
+     * The runner set's `GithubMicrovmRunnersProps.janitorInterval`, which sets
+     * how often the queued-job-age metric is emitted. {@link queuedJobAgeAlarm}
+     * derives its aggregation period from this so the alarm never evaluates a
+     * period the janitor could not have written a datapoint into (which would
+     * make missing-data-breaching page permanently). Optional and trailing to
+     * keep this constructor backward compatible and jsii-clean.
+     */
+    private readonly janitorInterval: Duration = Duration.minutes(5),
+    /**
+     * Whether the queued-job scan is unavailable for this runner set's auth +
+     * scope combination \u2014 true only under PAT auth with org scope, where
+     * `listInstallationRepos` cannot enumerate the org's repos (GitHub 403s a
+     * PAT there). The janitor skips the scan in that configuration, so
+     * `oldestQueuedJobSeconds`/`queuedJobs` never report and
+     * {@link queuedJobAgeAlarm} throws at synth rather than synthesizing an
+     * alarm that could only ever page on missing data.
+     */
+    private readonly queuedJobScanUnavailable: boolean = false,
   ) {}
 
   /** Messages sitting in the dead-letter queue: a launch or terminate intent SQS gave up redriving. */
@@ -539,6 +565,31 @@ export class GithubMicrovmRunnersMetrics {
   /** Janitor sweep count: failures on individual VMs, rows, or image versions during a sweep. The sweep isolates each one and still completes. */
   public errors(): cloudwatch.Metric {
     return this.emfMetric('errors');
+  }
+
+  /**
+   * Janitor per-class gauge (seconds): how long the oldest queued job this
+   * class owns has waited, measured read-only each sweep, or 0 when the class
+   * has nothing queued. A job is owned by a class when every runner label it
+   * requests beyond `self-hosted` is that class's label — GitHub's own
+   * matching — so another runner set's jobs are excluded. Emitted every sweep
+   * for every class, which is what lets {@link queuedJobAgeAlarm} treat missing
+   * data as breaching.
+   *
+   * Reported as an average across a period; the alarm reads it as a maximum.
+   */
+  public oldestQueuedJobSeconds(runnerClassLabel: string): cloudwatch.Metric {
+    return this.classGaugeMetric('OldestQueuedJobSeconds', runnerClassLabel);
+  }
+
+  /** Janitor per-class gauge: queued jobs this class owned as of the last sweep (see {@link oldestQueuedJobSeconds} for ownership). */
+  public queuedJobs(runnerClassLabel: string): cloudwatch.Metric {
+    return this.classGaugeMetric('QueuedJobs', runnerClassLabel);
+  }
+
+  /** Janitor per-sweep flag: 1 when a sweep hit its GitHub-listing cap and did not scan every queued job, so `oldestQueuedJobSeconds`/`queuedJobs` may under-report that sweep. */
+  public queuedJobScanTruncated(): cloudwatch.Metric {
+    return this.emfMetric('QueuedJobScanTruncated');
   }
 
   // --- Launcher metrics (per runner class) --------------------------------
@@ -800,12 +851,177 @@ export class GithubMicrovmRunnersMetrics {
   }
 
   /**
+   * Alarm when the janitor is reaping stuck runners in volume, the signal a
+   * refused runner version leaves. A stuck runner is one that registered with
+   * GitHub and then sat idle past `idleRunnerGraceSeconds`, reaped once a
+   * second sweep saw it the same way; a healthy runner set reaps the odd one.
+   *
+   * The threshold comes from an incident. On 2026-09-24 GitHub refused a stale
+   * runner version, so every launched runner registered and then went nowhere;
+   * `stuckRunnersReaped` ran 14–28 an hour for about six hours, peaking at
+   * 8–10 in a single five-minute sweep, against a month-long baseline that
+   * never exceeded 3 in any hour. The three ready-made alarms already on this
+   * class stayed OK throughout — nothing else caught it. A sum of 6 or more
+   * over one fifteen-minute period sits well above that baseline (≤0.75 per
+   * quarter-hour) and well below the incident's rate, so it fires about
+   * fifteen minutes into a refusal and stays quiet otherwise; pass
+   * `RunnerAlarmOptions` to change the threshold, window, or count.
+   *
+   * Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+   * without it.
+   * @default threshold 6, 1 evaluation period, 15-minute period
+   */
+  public stuckRunnersReapedAlarm(
+    scope: Construct,
+    options: RunnerAlarmOptions = {},
+  ): cloudwatch.Alarm {
+    this.requireEmittedMetrics('stuckRunnersReapedAlarm', 'stuckRunnersReaped');
+    return this.buildAlarm(
+      scope,
+      'StuckRunnersReapedAlarm',
+      this.stuckRunnersReaped(),
+      'MicroVM runner set: janitor is reaping stuck runners in volume (GitHub refusing the runner version?).',
+      { period: Duration.minutes(15), ...options },
+      6,
+    );
+  }
+
+  /**
+   * Alarm when the MicroVM service is rejecting a runner class's launches for
+   * capacity — the class's quota signal. Each rejection is a job queueing
+   * behind the account's MicroVM memory quota or the set's `maxConcurrentVms`
+   * rather than running, and spends one of its `maxReceiveCount` redrives on
+   * the way to the dead-letter queue. It fires on one rejection in each of
+   * three consecutive 5-minute periods, so a lone burst that the next launch
+   * clears does not page; pass `RunnerAlarmOptions` to change that. See
+   * docs/service-quotas.md for raising the ceiling.
+   *
+   * `capacityRejected` is dimensioned per runner class, so this builds one
+   * alarm per `runnerClassLabel` under an id unique to that label — call it
+   * once per class you want watched, in the same scope, without collision.
+   *
+   * Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+   * without it.
+   * @default threshold 1, 3 evaluation periods, 5-minute period
+   */
+  public capacityRejectedAlarm(
+    scope: Construct,
+    runnerClassLabel: string,
+    options: RunnerAlarmOptions = {},
+  ): cloudwatch.Alarm {
+    this.requireEmittedMetrics('capacityRejectedAlarm', 'CapacityRejected');
+    return this.buildAlarm(
+      scope,
+      `CapacityRejectedAlarm-${runnerClassLabel}`,
+      this.capacityRejected(runnerClassLabel),
+      `MicroVM runner set: launches for class '${runnerClassLabel}' are being rejected for capacity (MicroVM quota or maxConcurrentVms reached).`,
+      { evaluationPeriods: 3, ...options },
+      1,
+    );
+  }
+
+  /**
+   * Alarm when a runner class has a job that has waited queued far longer than
+   * a runner should take to appear — the signal that NO launch happened at
+   * all, which the reap-based alarms structurally cannot catch. A misrouted or
+   * dropped webhook, a GitHub App failure, a launch bug, or a MicroVM quota
+   * wall all leave the same fingerprint: a job sits `queued` and no VM is ever
+   * created for it, so there is no stuck runner to reap and no error to count.
+   *
+   * The janitor measures the oldest queued job per class every sweep, so this
+   * fires when a class's oldest queued job crosses the threshold (20 minutes
+   * by default) over its aggregation period, read as a maximum. It also
+   * **treats missing data as breaching**: the metric is emitted every sweep,
+   * so its absence means the janitor itself has gone silent — itself a failure
+   * worth paging on — rather than "nothing queued". A sweep that overruns its
+   * Lambda timeout emits no datapoint for that period, so a persistently slow
+   * or crashing janitor reads exactly like a silent one and pages: that is the
+   * intended "janitor went silent" signal, not a false alarm.
+   *
+   * Because absence pages, the aggregation period must be long enough that the
+   * janitor writes at least one datapoint into every period it evaluates. A
+   * 5-minute period against a 10-minute `janitorInterval` would leave every
+   * other period empty and page forever. So the default period is
+   * `max(5 min, 2 × janitorInterval)` rounded up to a CloudWatch-valid whole
+   * minute (two sweeps per period, so a single missed sweep does not trip it):
+   * 10 minutes at the default 5-minute interval, 20 minutes at a 10-minute
+   * interval. A caller-supplied `period` shorter than `janitorInterval` is
+   * rejected at synth — it would guarantee empty periods and permanent false
+   * pages.
+   *
+   * `oldestQueuedJobSeconds` is dimensioned per runner class, so this builds
+   * one alarm per `runnerClassLabel` under an id unique to that label — call it
+   * once per class you want watched, in the same scope, without collision.
+   *
+   * Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+   * without it. Also throws at synth under PAT auth with org scope, where the
+   * queued-job scan cannot enumerate the org's repos and never emits the
+   * metric this alarm watches.
+   * @default threshold 1200 (seconds), 1 evaluation period, period max(5 min, 2× janitorInterval), missing data breaching
+   */
+  public queuedJobAgeAlarm(
+    scope: Construct,
+    runnerClassLabel: string,
+    options: RunnerAlarmOptions = {},
+  ): cloudwatch.Alarm {
+    this.requireEmittedMetrics('queuedJobAgeAlarm', 'OldestQueuedJobSeconds');
+    if (this.queuedJobScanUnavailable) {
+      throw new Error(
+        'GithubMicrovmRunners: queuedJobAgeAlarm() is unavailable under PAT auth with org scope. ' +
+          'The queued-job scan enumerates the org’s repos via the App installation-repositories endpoint, which a ' +
+          'personal access token cannot call (GitHub returns 403), so the janitor skips the scan and never emits ' +
+          'OldestQueuedJobSeconds — a missing-data-breaching alarm on it would page forever. Use a GitHub App, or scope ' +
+          'this runner set to an explicit repository list (RunnerScope.repos([...])), to watch queued-job age.',
+      );
+    }
+    const janitorIntervalSeconds = this.janitorInterval.toSeconds();
+    if (
+      options.period !== undefined &&
+      options.period.toSeconds() < janitorIntervalSeconds
+    ) {
+      throw new Error(
+        `GithubMicrovmRunners: queuedJobAgeAlarm() period (${options.period.toSeconds()}s) must be at least the ` +
+          `janitorInterval (${janitorIntervalSeconds}s). The queued-job metric is emitted once per sweep, so a period ` +
+          'shorter than the sweep interval contains no datapoint every other period; with missing data treated as ' +
+          'breaching that guarantees a permanent false ALARM.',
+      );
+    }
+    return this.buildAlarm(
+      scope,
+      `QueuedJobAgeAlarm-${runnerClassLabel}`,
+      this.oldestQueuedJobSeconds(runnerClassLabel).with({
+        statistic: 'Maximum',
+      }),
+      `MicroVM runner set: class '${runnerClassLabel}' has a job queued far longer than a runner should take to appear, or the janitor has gone silent (no launch happened: webhook misrouted, App failure, launch bug, or quota?).`,
+      { period: this.queuedJobAgeDefaultPeriod(), ...options },
+      1200,
+      cloudwatch.TreatMissingData.BREACHING,
+    );
+  }
+
+  /**
+   * Default aggregation period for {@link queuedJobAgeAlarm}:
+   * `max(5 min, 2 × janitorInterval)`, rounded UP to a whole minute so it is a
+   * valid CloudWatch period (a multiple of 60 s). Two sweeps per period keeps a
+   * single missed sweep from tripping the missing-data-breaching alarm, while
+   * the 5-minute floor keeps the period from collapsing below CloudWatch's
+   * standard resolution on a very short interval.
+   */
+  private queuedJobAgeDefaultPeriod(): Duration {
+    const janitorIntervalSeconds = this.janitorInterval.toSeconds();
+    const twoSweeps = Math.ceil((2 * janitorIntervalSeconds) / 60) * 60;
+    return Duration.seconds(
+      Math.max(Duration.minutes(5).toSeconds(), twoSweeps),
+    );
+  }
+
+  /**
    * Guard for the alarms whose metric is EMF-emitted by a handler. With
    * `GithubMicrovmRunnersProps.emitMetrics` off the handlers write no
-   * metric at all, and these alarms use
-   * `TreatMissingData.NOT_BREACHING` — so they would synthesize fine, sit
-   * green forever, and never fire, which is strictly worse than no alarm.
-   * Fail at synth instead. Only the EMF-backed alarms call this;
+   * metric at all, so these alarms would synthesize fine but never have data
+   * to evaluate — whatever their missing-data treatment, they cannot do their
+   * job, which is strictly worse than no alarm. Fail at synth instead. Only
+   * the EMF-backed alarms call this;
    * {@link deadLetterQueueNotEmptyAlarm} watches SQS's own metric and works
    * either way, and the metric accessors themselves never throw (a consumer
    * may legitimately build a dashboard ahead of turning metrics on).
@@ -815,7 +1031,7 @@ export class GithubMicrovmRunnersMetrics {
       throw new Error(
         `GithubMicrovmRunners: ${alarmMethod}() requires emitMetrics: true. ` +
           `The alarm watches the \`${metricName}\` CloudWatch metric, which the handlers only emit when emitMetrics is enabled; ` +
-          'with it off the metric never reports and the alarm — which treats missing data as not-breaching — would stay green forever and never fire. ' +
+          'with it off the metric never reports, so the alarm would never have data to evaluate and cannot do its job. ' +
           'Set emitMetrics: true on GithubMicrovmRunnersProps (note CloudWatch bills custom metrics per metric per month), or drop this alarm and use deadLetterQueueNotEmptyAlarm, which watches an SQS metric and works either way.',
       );
     }
@@ -828,6 +1044,12 @@ export class GithubMicrovmRunnersMetrics {
     description: string,
     options: RunnerAlarmOptions,
     defaultThreshold: number,
+    // Most alarms treat missing data as NOT breaching (a metric that never
+    // reports should not page). `queuedJobAgeAlarm` is the exception — its
+    // metric is emitted every sweep, so absence means the janitor is silent,
+    // which IS the failure — so it passes BREACHING here.
+    treatMissingData: cloudwatch.TreatMissingData = cloudwatch.TreatMissingData
+      .NOT_BREACHING,
   ): cloudwatch.Alarm {
     const period = options.period ?? Duration.minutes(5);
     return new cloudwatch.Alarm(scope, id, {
@@ -836,7 +1058,7 @@ export class GithubMicrovmRunnersMetrics {
       evaluationPeriods: options.evaluationPeriods ?? 1,
       comparisonOperator:
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      treatMissingData,
       alarmDescription: description,
     });
   }
@@ -1540,10 +1762,31 @@ export class GithubMicrovmRunners extends Construct {
     // feature (aside from the always-present `WARM_POOL_JSON` env var, which
     // is `{}` in that case and a no-op everywhere it's read).
 
+    // Under PAT auth with org scope the janitor's queued-job scan cannot run:
+    // enumerating an org's repos goes through the App installation-repositories
+    // endpoint, which a personal access token cannot call (GitHub 403s). The
+    // janitor skips the scan in that configuration (no error counted, no class
+    // metrics emitted), so `queuedJobAgeAlarm` has no metric to watch and
+    // refuses to synthesize (see GithubMicrovmRunnersMetrics.queuedJobAgeAlarm).
+    const queuedJobScanUnavailable =
+      props.github.kind === GithubAuthKind.PAT &&
+      props.scope.kind === RunnerScopeKind.ORG;
+    if (emitMetrics && queuedJobScanUnavailable) {
+      Annotations.of(this).addWarning(
+        'GithubMicrovmRunners: emitMetrics is on with PAT auth + org scope, so the janitor cannot ' +
+          'enumerate the org\u2019s repos (the installation-repositories endpoint 403s a PAT). The ' +
+          'queued-job scan is skipped and OldestQueuedJobSeconds/QueuedJobs are not emitted, so ' +
+          'queuedJobAgeAlarm must not be used (it throws at synth). Use a GitHub App, or scope the ' +
+          'runner set to an explicit repository list (RunnerScope.repos([...])), to watch queued-job age.',
+      );
+    }
+
     this.metrics = new GithubMicrovmRunnersMetrics(
       runnerSetId,
       deadLetterQueue,
       emitMetrics,
+      janitorInterval,
+      queuedJobScanUnavailable,
     );
   }
 
