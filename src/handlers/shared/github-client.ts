@@ -38,6 +38,46 @@ export interface GithubRunner {
   status: string;
 }
 
+/** One repository an App installation can reach (GET /installation/repositories). The janitor's org-scoped queued-job scan enumerates these. */
+export interface InstallationRepo {
+  owner: string;
+  repo: string;
+}
+
+/** A workflow run, trimmed to what the janitor's queued-job scan needs. */
+export interface WorkflowRun {
+  id: number;
+  status: string;
+  /** When GitHub created the run; the fallback age origin for a queued job whose own timestamps are absent. */
+  createdAt: string | undefined;
+}
+
+/** One page of workflow runs plus whether another page exists (drives the janitor's budget-bounded pagination). */
+export interface WorkflowRunsPage {
+  runs: WorkflowRun[];
+  /** True when GitHub returned a full page, so an older page of runs remains unread. */
+  hasNextPage: boolean;
+}
+
+/** One page of a run's jobs plus whether another page exists. */
+export interface WorkflowRunJobsPage {
+  jobs: WorkflowRunJob[];
+  /** True when GitHub returned a full page, so more jobs of this run remain unread. */
+  hasNextPage: boolean;
+}
+
+/** A workflow-run job, trimmed to what the janitor's queued-job scan needs. */
+export interface WorkflowRunJob {
+  id: number;
+  status: string;
+  /** The runner labels the job requested (`runs-on`). */
+  labels: string[];
+  /** When the job started running (null/absent while still queued). */
+  startedAt: string | undefined;
+  /** When the job was created/enqueued; the primary age origin for a queued job. */
+  createdAt: string | undefined;
+}
+
 /**
  * Thrown when GitHub responds with a rate-limit signal (403/429 with
  * `retry-after` or `x-ratelimit-remaining: 0`). Callers (SQS-driven
@@ -525,6 +565,126 @@ export async function listRunners(
     }
   }
   return runners;
+}
+
+/**
+ * List the repositories the App installation for `target` can reach,
+ * paginating `per_page=100` like {@link listRunners}. The janitor's org-scoped
+ * queued-job scan uses this to enumerate the repos to look at; a single
+ * installation covers every repo under the org, so one call authenticates the
+ * whole scan.
+ *
+ * App-kind auth only: `/installation/repositories` requires an installation
+ * access token. Under PAT auth GitHub answers 403 (a PAT is not an
+ * installation), which surfaces to the caller as a per-repo-enumeration error
+ * the janitor counts and isolates — org scope is the App-kind path in
+ * practice.
+ */
+export async function listInstallationRepos(
+  target: ScopeTarget,
+): Promise<InstallationRepo[]> {
+  const repos: InstallationRepo[] = [];
+  const pageSize = 100;
+  for (let page = 1; ; page += 1) {
+    const res = await authedFetch(
+      target,
+      `/installation/repositories?per_page=${pageSize}&page=${page}`,
+    );
+    await assertOk(res);
+    const body = (await res.json()) as {
+      repositories: Array<{ name: string; owner: { login: string } }>;
+    };
+    for (const r of body.repositories) {
+      repos.push({ owner: r.owner.login, repo: r.name });
+    }
+    if (body.repositories.length < pageSize) {
+      break;
+    }
+  }
+  return repos;
+}
+
+/** `per_page` for the queued-job scan's listings; one page = one unit of the janitor's per-sweep listing budget. */
+const QUEUED_SCAN_PAGE_SIZE = 100;
+
+/**
+ * List ONE page of a repo's workflow runs filtered to `status` (`queued` |
+ * `in_progress`), `per_page=100`, returning the page and whether an older page
+ * remains ({@link WorkflowRunsPage.hasNextPage}).
+ *
+ * Single page PER CALL, not single page total: GitHub lists runs newest-first,
+ * so page one is the NEWEST runs and the oldest queued runs — the ones the
+ * queued-job-age alarm exists to catch — are on the LAST page. Fetching only
+ * page one would silently drop that oldest tail. The janitor therefore drives
+ * pagination itself, spending one unit of its per-sweep listing budget per
+ * page and flagging `QueuedJobScanTruncated` if the budget stops it with pages
+ * still unread — so a completed scan never under-reports without saying so.
+ */
+export async function listWorkflowRuns(
+  target: ScopeTarget,
+  owner: string,
+  repo: string,
+  status: string,
+  page: number,
+): Promise<WorkflowRunsPage> {
+  const res = await authedFetch(
+    target,
+    `/repos/${owner}/${repo}/actions/runs?status=${status}&per_page=${QUEUED_SCAN_PAGE_SIZE}&page=${page}`,
+  );
+  await assertOk(res);
+  const body = (await res.json()) as {
+    workflow_runs?: Array<{ id: number; status?: string; created_at?: string }>;
+  };
+  const raw = body.workflow_runs ?? [];
+  return {
+    runs: raw.map((r) => ({
+      id: r.id,
+      status: r.status ?? status,
+      createdAt: r.created_at ?? undefined,
+    })),
+    hasNextPage: raw.length === QUEUED_SCAN_PAGE_SIZE,
+  };
+}
+
+/**
+ * List ONE page of a workflow run's jobs (`per_page=100`), returning the page
+ * and whether more jobs remain — same budget-bounded pagination reasoning as
+ * {@link listWorkflowRuns}. A queued job's `labels` decide which runner class
+ * (if any) serves it, and its `createdAt`/`startedAt` date how long it has
+ * waited.
+ */
+export async function listWorkflowRunJobs(
+  target: ScopeTarget,
+  owner: string,
+  repo: string,
+  runId: number,
+  page: number,
+): Promise<WorkflowRunJobsPage> {
+  const res = await authedFetch(
+    target,
+    `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=${QUEUED_SCAN_PAGE_SIZE}&page=${page}`,
+  );
+  await assertOk(res);
+  const body = (await res.json()) as {
+    jobs?: Array<{
+      id: number;
+      status?: string;
+      labels?: string[];
+      started_at?: string | null;
+      created_at?: string | null;
+    }>;
+  };
+  const raw = body.jobs ?? [];
+  return {
+    jobs: raw.map((j) => ({
+      id: j.id,
+      status: j.status ?? 'queued',
+      labels: j.labels ?? [],
+      startedAt: j.started_at ?? undefined,
+      createdAt: j.created_at ?? undefined,
+    })),
+    hasNextPage: raw.length === QUEUED_SCAN_PAGE_SIZE,
+  };
 }
 
 /** Fetch a single runner by id, or `undefined` if it no longer exists. */

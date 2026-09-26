@@ -81,7 +81,13 @@ flowchart TD
    still queued that never got the runner they were promised. That last duty is
    the floor under the whole plane: GitHub announces a job once, so without it a
    launch that goes astray leaves the job waiting with no error anywhere. It is
-   on unless you set `recoverStuckLaunches` to false.
+   on unless you set `recoverStuckLaunches` to false. When `emitMetrics` is on,
+   each sweep also does one **read-only** pass over GitHub — measuring, per
+   runner class, how long jobs have sat queued — so a job for which no launch
+   ever happened surfaces as a metric even though there is nothing to reconcile.
+   It writes nothing to GitHub or the table for that pass.
+
+   See [Monitoring](monitoring.md) for the `queuedJobAgeAlarm` this feeds.
 
 A runner class that sets `warmPoolSize` adds a seventh piece: the **warm-pool
 Lambda**, on its own schedule, which keeps that class's pool at its target by

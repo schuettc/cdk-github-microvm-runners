@@ -87,7 +87,7 @@ up, and teardown:
 
 ```
 √ Connected to GitHub
-Current runner version: '2.335.1'
+Current runner version: '2.337.0'
 2026-07-24 19:46:05Z: Listening for Jobs
 2026-07-24 19:46:06Z: Running job: probe
 2026-07-24 19:46:09Z: Job probe completed with result: Succeeded

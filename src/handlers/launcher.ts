@@ -73,6 +73,7 @@ import {
   isRepoInScope,
   runnerSetConfigFor,
 } from './shared/runner-set-config.js';
+import { matchSizeClassLabel } from './shared/size-class-match.js';
 import { claimWarmVm } from './shared/warm-claim.js';
 
 /**
@@ -249,19 +250,15 @@ async function pushJitConfig(
  *
  * Split out from `resolveImageArn` (below) so the warm-path guard (Task 5)
  * can check whether the matched LABEL has a `WARM_POOL_JSON` target without
- * re-implementing this matching loop.
+ * re-implementing this matching loop. The matching itself lives in
+ * `shared/size-class-match.ts` so the janitor's queued-job-age scan resolves a
+ * job's class the exact same way — see {@link matchSizeClassLabel}.
  */
 function resolveMatchedSizeClass(
   labels: string[],
 ): { label: string; imageArn: string; imageVersion?: string } | undefined {
   const sizeClasses = readSizeClasses();
-  const labelSet = new Set(labels);
-  let matched: string | undefined;
-  for (const label of Object.keys(sizeClasses)) {
-    if (labelSet.has(label)) {
-      matched = label;
-    }
-  }
+  const matched = matchSizeClassLabel(labels, Object.keys(sizeClasses));
   return matched
     ? {
         label: matched,

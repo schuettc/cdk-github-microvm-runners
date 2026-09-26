@@ -19,7 +19,7 @@ export interface ImageAsset {
 
 /** Options for `RunnerImage.fromOptions`. */
 export interface RunnerImageOptions {
-  /** `actions/runner` release to install. @default RunnerVersion.latest() */
+  /** `actions/runner` release to install. @default RunnerVersion.libraryDefault() */
   readonly runnerVersion?: RunnerVersion;
   /** Extra `dnf` packages to install alongside the fixed base set. */
   readonly systemPackages?: string[];
