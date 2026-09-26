@@ -1,0 +1,195 @@
+# Runner-version watch — keeps DEFAULT_RUNNER_VERSION current with actions/runner.
+#
+# GitHub stops queuing jobs to a self-hosted runner that has not installed a new
+# actions/runner release within 30 days of its publication (the rule and its
+# rationale are in src/image/default-runner-version.ts and docs/images.md). This
+# library bakes one pinned release into every default image, so that pin has to
+# keep moving as releases ship. This job runs daily, and when GitHub's latest
+# release is STRICTLY newer than the pin it opens a PR to `dev` that rewrites the
+# constant — it never lowers the pin. See scripts/check-runner-version.mts.
+#
+# Why it opens a PR and does NOT auto-merge: a runner release can change the
+# agent's behaviour in ways that break the in-VM agent, so every bump goes
+# through the normal gate on a PR — `just verify` plus the consumer smoke test is
+# the check that the new runner still works. A green PR merged by a human is the
+# safety this deliberately keeps; there is no auto-merge.
+#
+# Why the PR is opened with a GitHub App token, not GITHUB_TOKEN: a PR opened
+# with the default GITHUB_TOKEN does not trigger other workflows, so its CI would
+# never run — exactly the gate this bump relies on. The upgrade-dev workflow has
+# the same problem and solves it with a projen App (PROJEN_APP_ID /
+# PROJEN_APP_PRIVATE_KEY) plus `sign-commits: true` — `dev` and `main` both
+# require signed commits, see projenrc/sign-upgrade-commits.ts. This reuses that
+# exact token path so the bump PR both gets CI and is mergeable.
+#
+# Staleness backstop: if a runner-bump PR sits open longer than 7 days, this
+# opens (or updates) one tracking issue carrying the 30-day deadline, so a
+# forgotten bump surfaces well before GitHub enforces the floor.
+#
+# NOTE: GitHub auto-disables `schedule` workflows after 60 days with no repo
+# activity. On a low-traffic library this can silently kill the watch — re-enable
+# it from the Actions tab (any push also resets the clock).
+
+name: Runner version watch
+
+on:
+  schedule:
+    # Daily, 06:00 UTC.
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: runner-version-watch
+  cancel-in-progress: false
+
+# Least privilege for the default token: it reads the repo (checkout) and opens
+# the staleness issue. The bump PR is created with the App token generated below,
+# not this token, so it triggers CI — but the App token is scoped to only the
+# permissions it needs on its own step.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+
+      # No `version:` — see the note in ci.yml.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Exit 0 = current, 10 = a newer release exists (the script emits the new
+      # version, publish date and 30-day deadline as step outputs), any other
+      # non-zero = the check itself failed and the job should go red.
+      - name: Compare pinned runner version with actions/runner latest
+        id: check
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          pnpm exec tsx scripts/check-runner-version.mts
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "The default is current."
+          elif [ "$code" -eq 10 ]; then
+            echo "The default is behind — a bump PR is needed."
+          else
+            echo "The runner-version check failed (exit $code)." >&2
+            exit "$code"
+          fi
+
+      # A PR opened with GITHUB_TOKEN would not trigger CI; this App token does.
+      # Scoped to just what the PR needs (see the header for why this path).
+      - name: Generate app token
+        id: app_token
+        if: steps.check.outputs.behind == 'true'
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859
+        with:
+          app-id: ${{ secrets.PROJEN_APP_ID }}
+          private-key: ${{ secrets.PROJEN_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # $LATEST / $CURRENT are strict X.Y.Z, validated by the script before it
+      # emits them, so nothing straight from the API reaches this shell.
+      - name: Rewrite the pinned version
+        if: steps.check.outputs.behind == 'true'
+        shell: bash
+        env:
+          CURRENT: ${{ steps.check.outputs.current }}
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          file=src/image/default-runner-version.ts
+          needle="export const DEFAULT_RUNNER_VERSION = '$CURRENT';"
+          count=$(grep -cF "$needle" "$file" || true)
+          if [ "$count" != "1" ]; then
+            echo "Expected exactly one pinned literal for $CURRENT in $file, found $count" >&2
+            exit 1
+          fi
+          replacement="export const DEFAULT_RUNNER_VERSION = '$LATEST';"
+          # Fixed-string match/replace via a tiny sed program built from the two
+          # validated versions — no regex metacharacters can appear in X.Y.Z.
+          sed -i "s|$needle|$replacement|" "$file"
+          git diff --stat "$file"
+
+      # A fixed branch name per version means create-pull-request updates the
+      # existing branch/PR when one is already open for this version, rather than
+      # opening a duplicate. sign-commits + the App token: signed (dev requires
+      # it) and CI-triggering.
+      - name: Open or update the bump PR
+        if: steps.check.outputs.behind == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app_token.outputs.token }}
+          base: dev
+          branch: chore/runner-${{ steps.check.outputs.latest }}
+          commit-message: 'chore(image): bump default actions/runner to ${{ steps.check.outputs.latest }}'
+          title: 'chore(image): bump default actions/runner to ${{ steps.check.outputs.latest }}'
+          body: |
+            actions/runner **${{ steps.check.outputs.latest }}** is published — the current default is `${{ steps.check.outputs.current }}`.
+
+            - Release: ${{ steps.check.outputs.release_url }}
+            - Published: ${{ steps.check.outputs.publish_date }}
+            - **Install-by deadline: ${{ steps.check.outputs.deadline }}** (30 days after publication). GitHub stops queuing jobs to runners still on an older release after this date.
+
+            This rewrites `DEFAULT_RUNNER_VERSION` in `src/image/default-runner-version.ts`. Merging goes through the normal gate — a runner release can break the in-VM agent, so `just verify` plus the smoke test is the check. **Do not auto-merge.**
+
+            ------
+
+            *Automatically created by the "Runner version watch" workflow.*
+          labels: runner-version
+          signoff: true
+          sign-commits: true
+          author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+
+      # If a bump PR (this run's or an earlier one) has been open more than 7
+      # days, surface it: one reused tracking issue carrying the deadline, so a
+      # forgotten PR is caught before the 30-day floor bites.
+      - name: Open or update the staleness issue
+        if: steps.check.outputs.behind == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEADLINE: ${{ steps.check.outputs.deadline }}
+        run: |
+          gh label create runner-version --color 0E8A16 \
+            --description "actions/runner default bump" 2>/dev/null || true
+          oldest=$(gh pr list --state open --label runner-version \
+            --json number,createdAt,url --jq 'sort_by(.createdAt) | .[0]')
+          if [ -z "$oldest" ] || [ "$oldest" = "null" ]; then
+            echo "No open runner-version PR to track."
+            exit 0
+          fi
+          number=$(echo "$oldest" | jq -r '.number')
+          created=$(echo "$oldest" | jq -r '.createdAt')
+          url=$(echo "$oldest" | jq -r '.url')
+          age_days=$(( ( $(date -u +%s) - $(date -u -d "$created" +%s) ) / 86400 ))
+          if [ "$age_days" -lt 7 ]; then
+            echo "Oldest open runner-version PR is ${age_days}d old (<7) — no issue."
+            exit 0
+          fi
+          BODY=$(printf 'A runner-default bump PR has been open for %s days (#%s: %s).\n\nGitHub stops queuing jobs to runners still on the old release after **%s** (30 days after the new release was published). Merge the bump PR before then.\n\nOpened/updated automatically by the "Runner version watch" workflow.' \
+            "$age_days" "$number" "$url" "$DEADLINE")
+          EXISTING=$(gh issue list --state open --label runner-version \
+            --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "Runner default is behind actions/runner" \
+              --label runner-version --body "$BODY"
+          fi
