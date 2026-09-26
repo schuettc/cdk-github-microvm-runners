@@ -27,6 +27,17 @@ those, and how to supply a Dockerfile of your own instead.
 
 A job can build and run containers. The base image carries the Docker engine,
 and the VM's agent starts `dockerd` at boot, as root, before any job arrives.
+On a Docker-capable image the agent will not accept a job until `dockerd`
+actually answers: it starts the daemon at boot and then, when the job's
+configuration arrives, waits (up to 120 seconds) for a real `docker info` to
+succeed before starting the runner. So a job never lands on a VM whose
+`docker` commands would fail because the daemon had not finished starting —
+the race that a job arriving a second after the runner connected used to lose.
+If the daemon never answers within that window the runner is not started, the
+job stays queued, and the VM is reaped as a stuck launch rather than taking the
+job and failing it. An image with no `dockerd` is unaffected and starts the
+runner straight away.
+
 Job steps reach it through `/var/run/docker.sock`, which the `runner` user
 holds through the `docker` group — no `sudo` involved, which matters because
 job steps cannot escalate privileges
@@ -241,6 +252,21 @@ release within **30 days** of its publication. Past that window GitHub stops
 queuing jobs to the runner, and registration itself needs at least `2.329.0`.
 The rule and its enforcement timeline are in GitHub's
 [changelog](https://github.blog/changelog/2026-06-12-github-actions-minimum-version-enforcement-timeline-for-self-hosted-runners/).
+
+### The runner does not self-update
+
+Runners here start with `--disableupdate`, so a VM never downloads and installs
+a newer `actions/runner` at boot. This follows GitHub's own guidance for
+ephemeral runners and matches actions-runner-controller, which runs with
+`DisableUpdate` by default: a just-in-time runner that begins a self-update
+tends to stop without ever taking its job — seen live as stale runners that
+registered, went offline, and were reaped instead of running anything. Because
+the runner is single-use and its version is fixed by the image, a self-update
+buys nothing and only adds a per-boot download and a failure mode.
+
+Currency therefore comes from the pin below plus watching for new releases
+(`runner-version-watch`), not from runners updating themselves: bump the pin
+and redeploy, and the next launch boots an image built with the newer runner.
 
 The library pins a default release and installs it on every image that does not
 ask for a specific one. That pin is what `RunnerVersion.libraryDefault()`
