@@ -96,12 +96,16 @@ absolute value; the rest are sums.
 
 `oldestQueuedJobSeconds` and `queuedJobs` come from a read-only pass the janitor
 makes over GitHub each sweep (only with `emitMetrics` on), asking how long jobs
-have been waiting per class. A job counts toward a class when every runner label
-it requests beyond `self-hosted` is that class's label — the same match GitHub
-makes — so another runner set's jobs in the same org do not count here. The pass
-is bounded per sweep; when it hits its listing cap it stops and reports
-`queuedJobScanTruncated` = 1, so a sweep that could not read everything says so
-rather than under-reporting silently.
+have been waiting per class. A job counts toward a class when it requests that
+class's label — the same match the launcher makes when it registers a runner
+for the job, and the same routing GitHub then does (the runner carries the
+job's full label set, so extra labels like `linux` or `ARM64` do not
+disqualify it). A job that requests none of this set's class labels is not one
+this set serves, so it does not count here. The pass is bounded per sweep and
+paginates within that budget: GitHub lists runs newest-first, so it reads older
+pages until the budget is spent. If the budget stops it with pages still
+unread it reports `queuedJobScanTruncated` = 1 — a completed scan never
+under-reports the oldest queued jobs without saying so.
 
 ## Ready-made alarms
 

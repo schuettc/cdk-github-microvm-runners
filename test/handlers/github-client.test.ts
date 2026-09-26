@@ -642,11 +642,11 @@ describe('listInstallationRepos', () => {
 });
 
 describe('listWorkflowRuns', () => {
-  it('lists queued runs (single page) and maps id/status/createdAt', async () => {
+  it('lists a page of queued runs and maps id/status/createdAt; a short page has no next', async () => {
     setPatEnv();
     pool
       .intercept({
-        path: '/repos/acme/widgets/actions/runs?status=queued&per_page=100',
+        path: '/repos/acme/widgets/actions/runs?status=queued&per_page=100&page=1',
         method: 'GET',
       })
       .reply(200, {
@@ -657,41 +657,72 @@ describe('listWorkflowRuns', () => {
         ],
       });
 
-    const runs = await listWorkflowRuns(
+    const page = await listWorkflowRuns(
       { owner: 'acme', repo: 'widgets' },
       'acme',
       'widgets',
       'queued',
+      1,
     );
-    expect(runs).toEqual([
+    expect(page.runs).toEqual([
       { id: 11, status: 'queued', createdAt: '2026-07-18T11:50:00.000Z' },
       { id: 12, status: 'queued', createdAt: '2026-07-18T11:55:00.000Z' },
     ]);
+    expect(page.hasNextPage).toBe(false);
   });
 
-  it('returns [] when the repo has no matching runs', async () => {
+  it('reports hasNextPage when a full page (per_page=100) comes back, and fetches the requested page', async () => {
     setPatEnv();
     pool
       .intercept({
-        path: '/repos/acme/widgets/actions/runs?status=in_progress&per_page=100',
+        path: '/repos/acme/widgets/actions/runs?status=queued&per_page=100&page=2',
+        method: 'GET',
+      })
+      .reply(200, {
+        total_count: 250,
+        workflow_runs: Array.from({ length: 100 }, (_, i) => ({
+          id: 200 + i,
+          status: 'queued',
+          created_at: '2026-07-18T11:50:00.000Z',
+        })),
+      });
+
+    const page = await listWorkflowRuns(
+      { owner: 'acme', repo: 'widgets' },
+      'acme',
+      'widgets',
+      'queued',
+      2,
+    );
+    expect(page.runs).toHaveLength(100);
+    expect(page.hasNextPage).toBe(true);
+  });
+
+  it('returns an empty page with no next when the repo has no matching runs', async () => {
+    setPatEnv();
+    pool
+      .intercept({
+        path: '/repos/acme/widgets/actions/runs?status=in_progress&per_page=100&page=1',
         method: 'GET',
       })
       .reply(200, { total_count: 0, workflow_runs: [] });
 
-    const runs = await listWorkflowRuns(
+    const page = await listWorkflowRuns(
       { owner: 'acme', repo: 'widgets' },
       'acme',
       'widgets',
       'in_progress',
+      1,
     );
-    expect(runs).toEqual([]);
+    expect(page.runs).toEqual([]);
+    expect(page.hasNextPage).toBe(false);
   });
 
   it('throws on a non-2xx (403/500)', async () => {
     setPatEnv();
     pool
       .intercept({
-        path: '/repos/acme/widgets/actions/runs?status=queued&per_page=100',
+        path: '/repos/acme/widgets/actions/runs?status=queued&per_page=100&page=1',
         method: 'GET',
       })
       .reply(500, { message: 'boom' });
@@ -702,17 +733,18 @@ describe('listWorkflowRuns', () => {
         'acme',
         'widgets',
         'queued',
+        1,
       ),
     ).rejects.toThrow();
   });
 });
 
 describe('listWorkflowRunJobs', () => {
-  it('lists the jobs of a run and maps status/labels/timestamps', async () => {
+  it('lists a page of a run jobs and maps status/labels/timestamps; a short page has no next', async () => {
     setPatEnv();
     pool
       .intercept({
-        path: '/repos/acme/widgets/actions/runs/11/jobs?per_page=100',
+        path: '/repos/acme/widgets/actions/runs/11/jobs?per_page=100&page=1',
         method: 'GET',
       })
       .reply(200, {
@@ -735,13 +767,14 @@ describe('listWorkflowRunJobs', () => {
         ],
       });
 
-    const jobs = await listWorkflowRunJobs(
+    const page = await listWorkflowRunJobs(
       { owner: 'acme', repo: 'widgets' },
       'acme',
       'widgets',
       11,
+      1,
     );
-    expect(jobs).toEqual([
+    expect(page.jobs).toEqual([
       {
         id: 101,
         status: 'queued',
@@ -757,13 +790,43 @@ describe('listWorkflowRunJobs', () => {
         createdAt: '2026-07-18T11:45:00.000Z',
       },
     ]);
+    expect(page.hasNextPage).toBe(false);
+  });
+
+  it('reports hasNextPage when a full page (per_page=100) comes back, and fetches the requested page', async () => {
+    setPatEnv();
+    pool
+      .intercept({
+        path: '/repos/acme/widgets/actions/runs/11/jobs?per_page=100&page=2',
+        method: 'GET',
+      })
+      .reply(200, {
+        total_count: 250,
+        jobs: Array.from({ length: 100 }, (_, i) => ({
+          id: 300 + i,
+          status: 'queued',
+          labels: ['self-hosted', 'microvm'],
+          started_at: null,
+          created_at: '2026-07-18T11:45:00.000Z',
+        })),
+      });
+
+    const page = await listWorkflowRunJobs(
+      { owner: 'acme', repo: 'widgets' },
+      'acme',
+      'widgets',
+      11,
+      2,
+    );
+    expect(page.jobs).toHaveLength(100);
+    expect(page.hasNextPage).toBe(true);
   });
 
   it('throws on a non-2xx (403/500)', async () => {
     setPatEnv();
     pool
       .intercept({
-        path: '/repos/acme/widgets/actions/runs/11/jobs?per_page=100',
+        path: '/repos/acme/widgets/actions/runs/11/jobs?per_page=100&page=1',
         method: 'GET',
       })
       .reply(403, { message: 'forbidden' });
@@ -774,6 +837,7 @@ describe('listWorkflowRunJobs', () => {
         'acme',
         'widgets',
         11,
+        1,
       ),
     ).rejects.toThrow();
   });

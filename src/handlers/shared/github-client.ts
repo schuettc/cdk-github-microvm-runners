@@ -52,6 +52,20 @@ export interface WorkflowRun {
   createdAt: string | undefined;
 }
 
+/** One page of workflow runs plus whether another page exists (drives the janitor's budget-bounded pagination). */
+export interface WorkflowRunsPage {
+  runs: WorkflowRun[];
+  /** True when GitHub returned a full page, so an older page of runs remains unread. */
+  hasNextPage: boolean;
+}
+
+/** One page of a run's jobs plus whether another page exists. */
+export interface WorkflowRunJobsPage {
+  jobs: WorkflowRunJob[];
+  /** True when GitHub returned a full page, so more jobs of this run remain unread. */
+  hasNextPage: boolean;
+}
+
 /** A workflow-run job, trimmed to what the janitor's queued-job scan needs. */
 export interface WorkflowRunJob {
   id: number;
@@ -590,54 +604,65 @@ export async function listInstallationRepos(
   return repos;
 }
 
+/** `per_page` for the queued-job scan's listings; one page = one unit of the janitor's per-sweep listing budget. */
+const QUEUED_SCAN_PAGE_SIZE = 100;
+
 /**
- * List a repo's workflow runs filtered to `status` (`queued` |
- * `in_progress`), first page only (`per_page=100`).
+ * List ONE page of a repo's workflow runs filtered to `status` (`queued` |
+ * `in_progress`), `per_page=100`, returning the page and whether an older page
+ * remains ({@link WorkflowRunsPage.hasNextPage}).
  *
- * DELIBERATELY single-page, unlike {@link listRunners}: the janitor's
- * queued-job scan is bounded by a per-sweep listing cap so its GitHub API
- * cost stays predictable, and that accounting treats one call as one listing.
- * Paginating here would turn one "run listing" into an unbounded number of
- * API calls and break the cap; a repo with more than 100 queued/in-progress
- * runs is vanishingly rare and the missing tail is caught by the truncation
- * signal, not by silently spending the whole rate-limit bucket.
+ * Single page PER CALL, not single page total: GitHub lists runs newest-first,
+ * so page one is the NEWEST runs and the oldest queued runs — the ones the
+ * queued-job-age alarm exists to catch — are on the LAST page. Fetching only
+ * page one would silently drop that oldest tail. The janitor therefore drives
+ * pagination itself, spending one unit of its per-sweep listing budget per
+ * page and flagging `QueuedJobScanTruncated` if the budget stops it with pages
+ * still unread — so a completed scan never under-reports without saying so.
  */
 export async function listWorkflowRuns(
   target: ScopeTarget,
   owner: string,
   repo: string,
   status: string,
-): Promise<WorkflowRun[]> {
+  page: number,
+): Promise<WorkflowRunsPage> {
   const res = await authedFetch(
     target,
-    `/repos/${owner}/${repo}/actions/runs?status=${status}&per_page=100`,
+    `/repos/${owner}/${repo}/actions/runs?status=${status}&per_page=${QUEUED_SCAN_PAGE_SIZE}&page=${page}`,
   );
   await assertOk(res);
   const body = (await res.json()) as {
     workflow_runs?: Array<{ id: number; status?: string; created_at?: string }>;
   };
-  return (body.workflow_runs ?? []).map((r) => ({
-    id: r.id,
-    status: r.status ?? status,
-    createdAt: r.created_at ?? undefined,
-  }));
+  const raw = body.workflow_runs ?? [];
+  return {
+    runs: raw.map((r) => ({
+      id: r.id,
+      status: r.status ?? status,
+      createdAt: r.created_at ?? undefined,
+    })),
+    hasNextPage: raw.length === QUEUED_SCAN_PAGE_SIZE,
+  };
 }
 
 /**
- * List the jobs of one workflow run (`per_page=100`, first page only — same
- * bounded-cost reasoning as {@link listWorkflowRuns}). A queued job's `labels`
- * decide which runner class (if any) owns it, and its `createdAt`/`startedAt`
- * date how long it has waited.
+ * List ONE page of a workflow run's jobs (`per_page=100`), returning the page
+ * and whether more jobs remain — same budget-bounded pagination reasoning as
+ * {@link listWorkflowRuns}. A queued job's `labels` decide which runner class
+ * (if any) serves it, and its `createdAt`/`startedAt` date how long it has
+ * waited.
  */
 export async function listWorkflowRunJobs(
   target: ScopeTarget,
   owner: string,
   repo: string,
   runId: number,
-): Promise<WorkflowRunJob[]> {
+  page: number,
+): Promise<WorkflowRunJobsPage> {
   const res = await authedFetch(
     target,
-    `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`,
+    `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=${QUEUED_SCAN_PAGE_SIZE}&page=${page}`,
   );
   await assertOk(res);
   const body = (await res.json()) as {
@@ -649,13 +674,17 @@ export async function listWorkflowRunJobs(
       created_at?: string | null;
     }>;
   };
-  return (body.jobs ?? []).map((j) => ({
-    id: j.id,
-    status: j.status ?? 'queued',
-    labels: j.labels ?? [],
-    startedAt: j.started_at ?? undefined,
-    createdAt: j.created_at ?? undefined,
-  }));
+  const raw = body.jobs ?? [];
+  return {
+    jobs: raw.map((j) => ({
+      id: j.id,
+      status: j.status ?? 'queued',
+      labels: j.labels ?? [],
+      startedAt: j.started_at ?? undefined,
+      createdAt: j.created_at ?? undefined,
+    })),
+    hasNextPage: raw.length === QUEUED_SCAN_PAGE_SIZE,
+  };
 }
 
 /** Fetch a single runner by id, or `undefined` if it no longer exists. */

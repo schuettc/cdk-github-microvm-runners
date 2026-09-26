@@ -939,10 +939,10 @@ export class GithubMicrovmRunnersMetrics {
   /**
    * Guard for the alarms whose metric is EMF-emitted by a handler. With
    * `GithubMicrovmRunnersProps.emitMetrics` off the handlers write no
-   * metric at all, and these alarms use
-   * `TreatMissingData.NOT_BREACHING` — so they would synthesize fine, sit
-   * green forever, and never fire, which is strictly worse than no alarm.
-   * Fail at synth instead. Only the EMF-backed alarms call this;
+   * metric at all, so these alarms would synthesize fine but never have data
+   * to evaluate — whatever their missing-data treatment, they cannot do their
+   * job, which is strictly worse than no alarm. Fail at synth instead. Only
+   * the EMF-backed alarms call this;
    * {@link deadLetterQueueNotEmptyAlarm} watches SQS's own metric and works
    * either way, and the metric accessors themselves never throw (a consumer
    * may legitimately build a dashboard ahead of turning metrics on).
@@ -952,7 +952,7 @@ export class GithubMicrovmRunnersMetrics {
       throw new Error(
         `GithubMicrovmRunners: ${alarmMethod}() requires emitMetrics: true. ` +
           `The alarm watches the \`${metricName}\` CloudWatch metric, which the handlers only emit when emitMetrics is enabled; ` +
-          'with it off the metric never reports and the alarm — which treats missing data as not-breaching — would stay green forever and never fire. ' +
+          'with it off the metric never reports, so the alarm would never have data to evaluate and cannot do its job. ' +
           'Set emitMetrics: true on GithubMicrovmRunnersProps (note CloudWatch bills custom metrics per metric per month), or drop this alarm and use deadLetterQueueNotEmptyAlarm, which watches an SQS metric and works either way.',
       );
     }

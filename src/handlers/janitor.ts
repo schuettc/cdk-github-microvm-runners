@@ -76,6 +76,7 @@ import {
   runnerSetConfigFor,
   type ScopeConfig,
 } from './shared/runner-set-config.js';
+import { matchSizeClassLabel } from './shared/size-class-match.js';
 
 const EMF_NAMESPACE = 'MicrovmRunners';
 /** Prefix for the janitor's own synthetic strike-memory row for a table-less VM (see module doc). */
@@ -1326,9 +1327,6 @@ const QUEUED_RUN_LISTING_CAP = 100;
 /** Per-sweep cap on GitHub job listings (`listWorkflowRunJobs` calls) the queued-job scan makes; see {@link QUEUED_RUN_LISTING_CAP}. */
 const QUEUED_JOB_LISTING_CAP = 200;
 
-/** The implicit label GitHub gives every self-hosted runner; excluded (case-insensitively) from a job's requested-label set before class ownership is decided. */
-const SELF_HOSTED_LABEL = 'self-hosted';
-
 /** The workflow-run statuses that can contain a still-`queued` job (a queued job can live inside an `in_progress` run). */
 const QUEUED_JOB_RUN_STATUSES = ['queued', 'in_progress'] as const;
 
@@ -1350,34 +1348,6 @@ interface QueueScanBudget {
   runListings: number;
   jobListings: number;
   truncated: boolean;
-}
-
-/**
- * Which registered class owns a queued job, or `undefined` if none does.
- *
- * Ownership mirrors GitHub's own runner-label matching for the runners this
- * construct registers: a class `C` registers runners carrying `self-hosted`
- * plus its single `C` label, so GitHub assigns `C` a job only when every
- * label the job requests is one of those. Strip `self-hosted`
- * (case-insensitively — the one implicit label) and the job is owned by `C`
- * iff every remaining requested label is `C`. A job that also requests a
- * label this set does not register (an extra custom label, another class's
- * label) is owned by no class here — exactly as GitHub would refuse to route
- * it to a `C` runner — so another runner set's jobs in the same org never
- * trip this set's alarm. A job requesting only `self-hosted` (no class label)
- * is owned by no class either.
- */
-function classForQueuedJob(
-  jobLabels: string[],
-  classLabels: string[],
-): string | undefined {
-  const requested = jobLabels.filter(
-    (l) => l.toLowerCase() !== SELF_HOSTED_LABEL,
-  );
-  if (requested.length === 0) {
-    return undefined;
-  }
-  return classLabels.find((c) => requested.every((l) => l === c));
 }
 
 /**
@@ -1420,68 +1390,98 @@ async function reposToScan(ctx: JanitorContext): Promise<RepoToScan[]> {
   return scan;
 }
 
-/** True once either listing cap is spent; sets `budget.truncated` as a side effect so the caller can stop and the scan is flagged. */
-function queueScanCapReached(budget: QueueScanBudget): boolean {
-  if (
-    budget.runListings >= QUEUED_RUN_LISTING_CAP ||
-    budget.jobListings >= QUEUED_JOB_LISTING_CAP
-  ) {
-    budget.truncated = true;
-    return true;
-  }
-  return false;
+/**
+ * Whether the per-sweep run-listing budget is spent. A PURE predicate (no side
+ * effect): truncation is flagged only where a fetch is actually skipped with
+ * work still to do, so a scan that consumes the budget EXACTLY and then
+ * finishes does not falsely report `QueuedJobScanTruncated`.
+ */
+function runBudgetSpent(budget: QueueScanBudget): boolean {
+  return budget.runListings >= QUEUED_RUN_LISTING_CAP;
 }
 
-/** Scan one repo's queued jobs into `states`, respecting the per-sweep listing caps. Throws on a GitHub read failure — the caller isolates it per repo. */
+/** Whether the per-sweep job-listing budget is spent. Pure, like {@link runBudgetSpent}. */
+function jobBudgetSpent(budget: QueueScanBudget): boolean {
+  return budget.jobListings >= QUEUED_JOB_LISTING_CAP;
+}
+
+/**
+ * Scan one repo's queued jobs into `states`, paginating each listing within the
+ * per-sweep budget (one page = one unit). GitHub lists runs newest-first, so
+ * the oldest queued runs are on the LAST page — paginating is what stops the
+ * scan from silently dropping the oldest tail the alarm exists to catch.
+ *
+ * Returns true when a listing budget was hit with pages still unread (the
+ * caller flags the sweep truncated and stops). Returns false when the repo was
+ * scanned to completion. Throws on a GitHub read failure — the caller isolates
+ * it per repo.
+ */
 async function scanRepoQueuedJobs(
   ctx: JanitorContext,
   repo: RepoToScan,
   classLabels: string[],
   states: Map<string, ClassQueueState>,
   budget: QueueScanBudget,
-): Promise<void> {
+): Promise<boolean> {
   for (const status of QUEUED_JOB_RUN_STATUSES) {
-    if (queueScanCapReached(budget)) {
-      return;
-    }
-    const runs = await listWorkflowRuns(
-      repo.target,
-      repo.owner,
-      repo.repo,
-      status,
-    );
-    budget.runListings += 1;
-    for (const run of runs) {
-      if (queueScanCapReached(budget)) {
-        return;
+    for (let page = 1; ; page += 1) {
+      // Budget checked BEFORE the fetch: reaching this point on page > 1, or on
+      // a later status, means a previous page/status reported more to read, so
+      // stopping here is real truncation, not an exact-fit completion.
+      if (runBudgetSpent(budget)) {
+        return true;
       }
-      const jobs = await listWorkflowRunJobs(
+      const { runs, hasNextPage } = await listWorkflowRuns(
         repo.target,
         repo.owner,
         repo.repo,
-        run.id,
+        status,
+        page,
       );
-      budget.jobListings += 1;
-      for (const job of jobs) {
-        if (job.status !== 'queued') {
-          continue;
+      budget.runListings += 1;
+      for (const run of runs) {
+        for (let jobPage = 1; ; jobPage += 1) {
+          if (jobBudgetSpent(budget)) {
+            return true;
+          }
+          const { jobs, hasNextPage: jobsHasNextPage } =
+            await listWorkflowRunJobs(
+              repo.target,
+              repo.owner,
+              repo.repo,
+              run.id,
+              jobPage,
+            );
+          budget.jobListings += 1;
+          for (const job of jobs) {
+            if (job.status !== 'queued') {
+              continue;
+            }
+            const label = matchSizeClassLabel(job.labels, classLabels);
+            if (!label) {
+              continue;
+            }
+            const state = states.get(label);
+            if (!state) {
+              continue;
+            }
+            state.queuedJobs += 1;
+            const age = queuedJobAgeSeconds(job, run.createdAt, ctx.nowMs);
+            if (age > state.oldestQueuedJobSeconds) {
+              state.oldestQueuedJobSeconds = age;
+            }
+          }
+          if (!jobsHasNextPage) {
+            break;
+          }
         }
-        const label = classForQueuedJob(job.labels, classLabels);
-        if (!label) {
-          continue;
-        }
-        const state = states.get(label);
-        if (!state) {
-          continue;
-        }
-        state.queuedJobs += 1;
-        const age = queuedJobAgeSeconds(job, run.createdAt, ctx.nowMs);
-        if (age > state.oldestQueuedJobSeconds) {
-          state.oldestQueuedJobSeconds = age;
-        }
+      }
+      if (!hasNextPage) {
+        break;
       }
     }
   }
+  return false;
 }
 
 /**
@@ -1554,11 +1554,23 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
   try {
     const repos = await reposToScan(ctx);
     for (const repo of repos) {
-      if (queueScanCapReached(budget)) {
+      if (runBudgetSpent(budget) || jobBudgetSpent(budget)) {
+        // A repo is left unscanned because the budget is spent: real truncation.
+        budget.truncated = true;
         break;
       }
       try {
-        await scanRepoQueuedJobs(ctx, repo, classLabels, states, budget);
+        const capHit = await scanRepoQueuedJobs(
+          ctx,
+          repo,
+          classLabels,
+          states,
+          budget,
+        );
+        if (capHit) {
+          budget.truncated = true;
+          break;
+        }
       } catch (err) {
         // Per-repo isolation: one repo's GitHub read failing must not blank
         // the others or report it as "0 queued". Count it and carry on.

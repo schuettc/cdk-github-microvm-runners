@@ -211,8 +211,8 @@ beforeEach(() => {
   // Default: the queued-job scan finds no repos / no runs, so it emits
   // all-zero class metrics and touches nothing. Individual tests override.
   listInstallationReposMock.mockResolvedValue([]);
-  listWorkflowRunsMock.mockResolvedValue([]);
-  listWorkflowRunJobsMock.mockResolvedValue([]);
+  listWorkflowRunsMock.mockResolvedValue({ runs: [], hasNextPage: false });
+  listWorkflowRunJobsMock.mockResolvedValue({ jobs: [], hasNextPage: false });
   // Default: DLQ is empty (ReceiveMessage returns no messages).
   sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
   sqsMock.on(SendMessageCommand).resolves({});
@@ -2091,6 +2091,30 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     listInstallationReposMock.mockResolvedValue(repos);
   }
 
+  /** One page of runs (no next page) for `queued`, empty for other statuses. */
+  function queuedRunsPage(
+    runs: { id: number; status: string; createdAt: string | undefined }[],
+  ): void {
+    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
+      status === 'queued'
+        ? { runs, hasNextPage: false }
+        : { runs: [], hasNextPage: false },
+    );
+  }
+
+  /** One page of jobs (no next page) for every run. */
+  function jobsPage(
+    jobs: {
+      id: number;
+      status: string;
+      labels: string[];
+      startedAt: string | undefined;
+      createdAt: string | undefined;
+    }[],
+  ): void {
+    listWorkflowRunJobsMock.mockResolvedValue({ jobs, hasNextPage: false });
+  }
+
   function twoClassEnv(): void {
     setEnv({
       SIZE_CLASSES_JSON: JSON.stringify({
@@ -2103,12 +2127,8 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
   it('a queued job owned by a class sets OldestQueuedJobSeconds to its age and QueuedJobs to the count; other classes read 0', async () => {
     twoClassEnv();
     setRepos([{ owner: 'acme', repo: 'widgets' }]);
-    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
-      status === 'queued'
-        ? [{ id: 11, status: 'queued', createdAt: undefined }]
-        : [],
-    );
-    listWorkflowRunJobsMock.mockResolvedValue([
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
       {
         id: 101,
         status: 'queued',
@@ -2145,18 +2165,14 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     logSpy.mockRestore();
   });
 
-  it('a job requesting a label this set does not register is owned by no class (never trips this set)', async () => {
+  it('a job requesting a size-class label plus extra labels this set does not register still counts (the launcher registers a runner carrying the full label set, so GitHub routes it)', async () => {
+    // Was previously asserted "owned by no class"; the launcher matches on the
+    // PRESENCE of the class label, so this job IS served by 'small'.
     twoClassEnv();
     setRepos([{ owner: 'acme', repo: 'widgets' }]);
-    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
-      status === 'queued'
-        ? [{ id: 11, status: 'queued', createdAt: undefined }]
-        : [],
-    );
-    listWorkflowRunJobsMock.mockResolvedValue([
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
       {
-        // 'small' matches a class, but 'gpu' is a label this set never
-        // registers, so GitHub would never route it to a 'small' runner.
         id: 101,
         status: 'queued',
         labels: ['self-hosted', 'small', 'gpu'],
@@ -2170,8 +2186,87 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
 
     await handler();
 
+    expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBe(1);
+    expect(classEnvelope(logSpy, 'small')?.OldestQueuedJobSeconds).toBe(900);
+    logSpy.mockRestore();
+  });
+
+  it('a job with a size-class label and OS/arch labels (self-hosted, linux, ARM64, bh-small) counts for its class, like the launcher', async () => {
+    setEnv({
+      SIZE_CLASSES_JSON: JSON.stringify({
+        'bh-small': { imageArn: IMAGE_ARN_DEFAULT },
+      }),
+    });
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'linux', 'ARM64', 'bh-small'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(600),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(classEnvelope(logSpy, 'bh-small')?.QueuedJobs).toBe(1);
+    expect(classEnvelope(logSpy, 'bh-small')?.OldestQueuedJobSeconds).toBe(600);
+    logSpy.mockRestore();
+  });
+
+  it('a job requesting two size-class labels resolves to the same class the launcher would (last declared match wins)', async () => {
+    twoClassEnv(); // declares { small, large } in that order
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'small', 'large'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(720),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    // 'large' is declared after 'small', so last-match-wins picks 'large' \u2014
+    // exactly resolveMatchedSizeClass in the launcher.
+    expect(classEnvelope(logSpy, 'large')?.QueuedJobs).toBe(1);
+    expect(classEnvelope(logSpy, 'large')?.OldestQueuedJobSeconds).toBe(720);
     expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBe(0);
-    expect(classEnvelope(logSpy, 'small')?.OldestQueuedJobSeconds).toBe(0);
+    logSpy.mockRestore();
+  });
+
+  it('a job requesting no size-class label (only self-hosted) is not counted', async () => {
+    twoClassEnv();
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(900),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBe(0);
+    expect(classEnvelope(logSpy, 'large')?.QueuedJobs).toBe(0);
     logSpy.mockRestore();
   });
 
@@ -2180,33 +2275,39 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     setRepos([{ owner: 'acme', repo: 'widgets' }]);
     listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
       status === 'in_progress'
-        ? [{ id: 22, status: 'in_progress', createdAt: undefined }]
-        : [],
+        ? {
+            runs: [{ id: 22, status: 'in_progress', createdAt: undefined }],
+            hasNextPage: false,
+          }
+        : { runs: [], hasNextPage: false },
     );
-    listWorkflowRunJobsMock.mockResolvedValue([
-      {
-        id: 201,
-        status: 'in_progress',
-        labels: ['self-hosted', 'microvm'],
-        startedAt: isoMinusSeconds(60),
-        createdAt: isoMinusSeconds(1200),
-      },
-      {
-        id: 202,
-        status: 'completed',
-        labels: ['self-hosted', 'microvm'],
-        startedAt: isoMinusSeconds(600),
-        createdAt: isoMinusSeconds(1200),
-      },
-      {
-        // still queued even though its run is in_progress — counts.
-        id: 203,
-        status: 'queued',
-        labels: ['self-hosted', 'microvm'],
-        startedAt: undefined,
-        createdAt: isoMinusSeconds(1500),
-      },
-    ]);
+    listWorkflowRunJobsMock.mockResolvedValue({
+      hasNextPage: false,
+      jobs: [
+        {
+          id: 201,
+          status: 'in_progress',
+          labels: ['self-hosted', 'microvm'],
+          startedAt: isoMinusSeconds(60),
+          createdAt: isoMinusSeconds(1200),
+        },
+        {
+          id: 202,
+          status: 'completed',
+          labels: ['self-hosted', 'microvm'],
+          startedAt: isoMinusSeconds(600),
+          createdAt: isoMinusSeconds(1200),
+        },
+        {
+          // still queued even though its run is in_progress — counts.
+          id: 203,
+          status: 'queued',
+          labels: ['self-hosted', 'microvm'],
+          startedAt: undefined,
+          createdAt: isoMinusSeconds(1500),
+        },
+      ],
+    });
     const logSpy = jest
       .spyOn(console, 'log')
       .mockImplementation(() => undefined);
@@ -2226,12 +2327,8 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
         repos: ['acme/widgets', 'acme/gadgets'],
       }),
     });
-    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
-      status === 'queued'
-        ? [{ id: 11, status: 'queued', createdAt: undefined }]
-        : [],
-    );
-    listWorkflowRunJobsMock.mockResolvedValue([
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
       {
         id: 101,
         status: 'queued',
@@ -2266,10 +2363,13 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
         throw new Error('github-client: GitHub API error 403');
       }
       return status === 'queued'
-        ? [{ id: 11, status: 'queued', createdAt: undefined }]
-        : [];
+        ? {
+            runs: [{ id: 11, status: 'queued', createdAt: undefined }],
+            hasNextPage: false,
+          }
+        : { runs: [], hasNextPage: false };
     });
-    listWorkflowRunJobsMock.mockResolvedValue([
+    jobsPage([
       {
         id: 101,
         status: 'queued',
@@ -2304,7 +2404,7 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
         repos: Array.from({ length: 60 }, (_, i) => `acme/repo-${i}`),
       }),
     });
-    listWorkflowRunsMock.mockResolvedValue([]);
+    listWorkflowRunsMock.mockResolvedValue({ runs: [], hasNextPage: false });
     const logSpy = jest
       .spyOn(console, 'log')
       .mockImplementation(() => undefined);
@@ -2312,6 +2412,107 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     await handler();
 
     expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(1);
+    logSpy.mockRestore();
+  });
+
+  it('paginates past 100 runs so the oldest queued jobs (on the last page) are still counted', async () => {
+    setEnv();
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    // queued: page 1 is a full 100 runs (hasNextPage), page 2 is the single
+    // oldest run \u2014 GitHub lists newest-first, so it is only reachable by paging.
+    listWorkflowRunsMock.mockImplementation(
+      async (_t, _o, _r, status, page) => {
+        if (status !== 'queued') {
+          return { runs: [], hasNextPage: false };
+        }
+        if (page === 1) {
+          return {
+            runs: Array.from({ length: 100 }, (_, i) => ({
+              id: i + 1,
+              status: 'queued',
+              createdAt: undefined,
+            })),
+            hasNextPage: true,
+          };
+        }
+        return {
+          runs: [{ id: 999, status: 'queued', createdAt: undefined }],
+          hasNextPage: false,
+        };
+      },
+    );
+    listWorkflowRunJobsMock.mockImplementation(async (_t, _o, _r, runId) => ({
+      hasNextPage: false,
+      jobs: [
+        {
+          id: runId + 100000,
+          status: 'queued',
+          labels: ['self-hosted', 'microvm'],
+          startedAt: undefined,
+          createdAt:
+            runId === 999 ? isoMinusSeconds(3600) : isoMinusSeconds(60),
+        },
+      ],
+    }));
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const microvm = classEnvelope(logSpy, 'microvm');
+    expect(microvm?.QueuedJobs).toBe(101);
+    expect(microvm?.OldestQueuedJobSeconds).toBe(3600);
+    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(0);
+    logSpy.mockRestore();
+  });
+
+  it('exhausting the job-listing budget mid-pagination sets QueuedJobScanTruncated to 1', async () => {
+    setEnv();
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    // Every job page reports another page, so the run never finishes within the
+    // per-sweep job budget \u2014 the scan must stop and flag truncation.
+    listWorkflowRunJobsMock.mockResolvedValue({
+      hasNextPage: true,
+      jobs: [
+        {
+          id: 1,
+          status: 'queued',
+          labels: ['self-hosted', 'microvm'],
+          startedAt: undefined,
+          createdAt: isoMinusSeconds(300),
+        },
+      ],
+    });
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(1);
+    logSpy.mockRestore();
+  });
+
+  it('an exact-fit scan that spends the budget precisely and finishes does not report truncation', async () => {
+    // 50 repos x 2 status listings = exactly the 100 run-listing cap, all
+    // empty and complete \u2014 the budget is spent to the unit with nothing left,
+    // so truncated must be 0 (the fixed queueScanCapReached false-positive).
+    setEnv({
+      SCOPE_JSON: JSON.stringify({
+        kind: 'repos',
+        repos: Array.from({ length: 50 }, (_, i) => `acme/repo-${i}`),
+      }),
+    });
+    listWorkflowRunsMock.mockResolvedValue({ runs: [], hasNextPage: false });
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(0);
     logSpy.mockRestore();
   });
 
