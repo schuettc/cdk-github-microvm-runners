@@ -2487,7 +2487,7 @@ new cw.Alarm(stack, 'SweepErrors', {
 ```typescript
 import { GithubMicrovmRunnersMetrics } from 'cdk-github-microvm-runners'
 
-new GithubMicrovmRunnersMetrics(runnerSetId: string, deadLetterQueue: IQueue, emitMetrics?: boolean)
+new GithubMicrovmRunnersMetrics(runnerSetId: string, deadLetterQueue: IQueue, emitMetrics?: boolean, janitorInterval?: Duration, queuedJobScanUnavailable?: boolean)
 ```
 
 | **Name** | **Type** | **Description** |
@@ -2495,6 +2495,8 @@ new GithubMicrovmRunnersMetrics(runnerSetId: string, deadLetterQueue: IQueue, em
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.Initializer.parameter.runnerSetId">runnerSetId</a></code> | <code>string</code> | *No description.* |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.Initializer.parameter.deadLetterQueue">deadLetterQueue</a></code> | <code>aws-cdk-lib.aws_sqs.IQueue</code> | *No description.* |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.Initializer.parameter.emitMetrics">emitMetrics</a></code> | <code>boolean</code> | Whether the runner set reports the metrics this class names, which is `GithubMicrovmRunnersProps.emitMetrics`. Every accessor except `deadLetterQueueDepth` depends on it, though they all return a `Metric` either way; only the two alarms over those metrics refuse to synthesize. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.Initializer.parameter.janitorInterval">janitorInterval</a></code> | <code>aws-cdk-lib.Duration</code> | The runner set's `GithubMicrovmRunnersProps.janitorInterval`, which sets how often the queued-job-age metric is emitted. {@link queuedJobAgeAlarm} derives its aggregation period from this so the alarm never evaluates a period the janitor could not have written a datapoint into (which would make missing-data-breaching page permanently). Optional and trailing to keep this constructor backward compatible and jsii-clean. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.Initializer.parameter.queuedJobScanUnavailable">queuedJobScanUnavailable</a></code> | <code>boolean</code> | Whether the queued-job scan is unavailable for this runner set's auth + scope combination \u2014 true only under PAT auth with org scope, where `listInstallationRepos` cannot enumerate the org's repos (GitHub 403s a PAT there). |
 
 ---
 
@@ -2515,6 +2517,27 @@ new GithubMicrovmRunnersMetrics(runnerSetId: string, deadLetterQueue: IQueue, em
 - *Type:* boolean
 
 Whether the runner set reports the metrics this class names, which is `GithubMicrovmRunnersProps.emitMetrics`. Every accessor except `deadLetterQueueDepth` depends on it, though they all return a `Metric` either way; only the two alarms over those metrics refuse to synthesize.
+
+---
+
+##### `janitorInterval`<sup>Optional</sup> <a name="janitorInterval" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.Initializer.parameter.janitorInterval"></a>
+
+- *Type:* aws-cdk-lib.Duration
+
+The runner set's `GithubMicrovmRunnersProps.janitorInterval`, which sets how often the queued-job-age metric is emitted. {@link queuedJobAgeAlarm} derives its aggregation period from this so the alarm never evaluates a period the janitor could not have written a datapoint into (which would make missing-data-breaching page permanently). Optional and trailing to keep this constructor backward compatible and jsii-clean.
+
+---
+
+##### `queuedJobScanUnavailable`<sup>Optional</sup> <a name="queuedJobScanUnavailable" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.Initializer.parameter.queuedJobScanUnavailable"></a>
+
+- *Type:* boolean
+
+Whether the queued-job scan is unavailable for this runner set's auth + scope combination \u2014 true only under PAT auth with org scope, where `listInstallationRepos` cannot enumerate the org's repos (GitHub 403s a PAT there).
+
+The janitor skips the scan in that configuration, so
+`oldestQueuedJobSeconds`/`queuedJobs` never report and
+{@link queuedJobAgeAlarm} throws at synth rather than synthesizing an
+alarm that could only ever page on missing data.
 
 ---
 
@@ -2846,17 +2869,33 @@ created for it, so there is no stuck runner to reap and no error to count.
 
 The janitor measures the oldest queued job per class every sweep, so this
 fires when a class's oldest queued job crosses the threshold (20 minutes
-by default) over a single 5-minute period, read as a maximum. It also
+by default) over its aggregation period, read as a maximum. It also
 **treats missing data as breaching**: the metric is emitted every sweep,
 so its absence means the janitor itself has gone silent — itself a failure
-worth paging on — rather than "nothing queued".
+worth paging on — rather than "nothing queued". A sweep that overruns its
+Lambda timeout emits no datapoint for that period, so a persistently slow
+or crashing janitor reads exactly like a silent one and pages: that is the
+intended "janitor went silent" signal, not a false alarm.
+
+Because absence pages, the aggregation period must be long enough that the
+janitor writes at least one datapoint into every period it evaluates. A
+5-minute period against a 10-minute `janitorInterval` would leave every
+other period empty and page forever. So the default period is
+`max(5 min, 2 × janitorInterval)` rounded up to a CloudWatch-valid whole
+minute (two sweeps per period, so a single missed sweep does not trip it):
+10 minutes at the default 5-minute interval, 20 minutes at a 10-minute
+interval. A caller-supplied `period` shorter than `janitorInterval` is
+rejected at synth — it would guarantee empty periods and permanent false
+pages.
 
 `oldestQueuedJobSeconds` is dimensioned per runner class, so this builds
 one alarm per `runnerClassLabel` under an id unique to that label — call it
 once per class you want watched, in the same scope, without collision.
 
 Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
-without it.
+without it. Also throws at synth under PAT auth with org scope, where the
+queued-job scan cannot enumerate the org's repos and never emits the
+metric this alarm watches.
 
 ###### `scope`<sup>Required</sup> <a name="scope" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobAgeAlarm.parameter.scope"></a>
 

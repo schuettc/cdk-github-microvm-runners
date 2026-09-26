@@ -1,5 +1,5 @@
 import { App, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { ManagedPolicy, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
@@ -2348,10 +2348,11 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
     });
   });
 
-  it('queuedJobAgeAlarm fires at >=1200s over one 5-minute period, missing data BREACHING, per class', () => {
+  it('queuedJobAgeAlarm fires at >=1200s over a 10-minute period (2\u00d7 the default 5-minute janitorInterval), missing data BREACHING, per class', () => {
     const stack = newStack();
     const runners = mkRunners(stack, 'Runners', {
       ...minimalProps(stack),
+      scope: RunnerScope.repos(['my-org/api']),
       emitMetrics: true,
     });
     runners.metrics.queuedJobAgeAlarm(stack, 'microvm');
@@ -2361,7 +2362,10 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
       Statistic: 'Maximum',
       Threshold: 1200,
       EvaluationPeriods: 1,
-      Period: 300,
+      // Default period follows janitorInterval: max(5 min, 2\u00d7 5 min) = 10 min,
+      // so every evaluated period holds at least one sweep's datapoint and the
+      // missing-data-breaching alarm cannot page on an empty period.
+      Period: 600,
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',
       // The distinguishing property: a silent janitor (no metric) must page.
       TreatMissingData: 'breaching',
@@ -2369,10 +2373,42 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
     });
   });
 
+  it('queuedJobAgeAlarm default period is max(5 min, 2\u00d7 janitorInterval): a 10-minute janitorInterval gives a 20-minute period', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      scope: RunnerScope.repos(['my-org/api']),
+      emitMetrics: true,
+      janitorInterval: Duration.minutes(10),
+    });
+    runners.metrics.queuedJobAgeAlarm(stack, 'microvm');
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'OldestQueuedJobSeconds',
+      Period: 1200,
+      TreatMissingData: 'breaching',
+    });
+  });
+
+  it('queuedJobAgeAlarm throws when a caller-supplied period is shorter than janitorInterval (would guarantee empty periods and permanent false pages)', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      scope: RunnerScope.repos(['my-org/api']),
+      emitMetrics: true,
+      janitorInterval: Duration.minutes(10),
+    });
+    expect(() =>
+      runners.metrics.queuedJobAgeAlarm(stack, 'microvm', {
+        period: Duration.minutes(5),
+      }),
+    ).toThrow(/period \(300s\) must be at least the janitorInterval \(600s\)/);
+  });
+
   it('queuedJobAgeAlarm uses a construct id unique per class label, so two classes give two alarms in one scope', () => {
     const stack = newStack();
     const runners = mkRunners(stack, 'Runners', {
       ...minimalProps(stack),
+      scope: RunnerScope.repos(['my-org/api']),
       emitMetrics: true,
     });
     runners.metrics.queuedJobAgeAlarm(stack, 'small');
@@ -2383,22 +2419,62 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
     expect(Object.keys(alarms).length).toBe(2);
   });
 
-  it('queuedJobAgeAlarm honours option overrides', () => {
+  it('queuedJobAgeAlarm honours option overrides (period at or above janitorInterval is accepted)', () => {
     const stack = newStack();
     const runners = mkRunners(stack, 'Runners', {
       ...minimalProps(stack),
+      scope: RunnerScope.repos(['my-org/api']),
       emitMetrics: true,
     });
     runners.metrics.queuedJobAgeAlarm(stack, 'microvm', {
       threshold: 600,
       evaluationPeriods: 2,
-      period: Duration.minutes(1),
+      period: Duration.minutes(15),
     });
     Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
       Threshold: 600,
       EvaluationPeriods: 2,
-      Period: 60,
+      Period: 900,
     });
+  });
+
+  it('queuedJobAgeAlarm throws at synth under PAT auth with org scope (the queued-job scan is unavailable there)', () => {
+    const stack = newStack();
+    // minimalProps is PAT auth + org scope \u2014 the unavailable combination.
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    expect(() => runners.metrics.queuedJobAgeAlarm(stack, 'microvm')).toThrow(
+      /queuedJobAgeAlarm\(\) is unavailable under PAT auth with org scope/,
+    );
+  });
+
+  it('emitMetrics on with PAT auth + org scope emits a synth-time warning that the queued-job scan is unavailable', () => {
+    const stack = newStack();
+    mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    Annotations.fromStack(stack).hasWarning(
+      '*',
+      Match.stringLikeRegexp(
+        '.*queued-job scan is skipped.*queuedJobAgeAlarm must not be used.*',
+      ),
+    );
+  });
+
+  it('no queued-job-scan warning when emitMetrics is on but scope is repos (PAT can scan explicit repos)', () => {
+    const stack = newStack();
+    mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      scope: RunnerScope.repos(['my-org/api']),
+      emitMetrics: true,
+    });
+    Annotations.fromStack(stack).hasNoWarning(
+      '*',
+      Match.stringLikeRegexp('.*queued-job scan is skipped.*'),
+    );
   });
 
   it('queuedJobScanTruncated / oldestQueuedJobSeconds / queuedJobs accessors return metrics in the MicrovmRunners namespace', () => {
@@ -2578,10 +2654,13 @@ describe('GithubMicrovmRunners: emitMetrics opt-in gate', () => {
     );
   });
 
-  it('both EMF-backed alarms succeed with emitMetrics: true', () => {
+  it('all EMF-backed alarms succeed with emitMetrics: true', () => {
     const stack = newStack();
+    // repos scope so queuedJobAgeAlarm is available (PAT + org would make the
+    // queued-job scan unavailable and that one alarm throw).
     const runners = mkRunners(stack, 'Runners', {
       ...minimalProps(stack),
+      scope: RunnerScope.repos(['my-org/api']),
       emitMetrics: true,
     });
     expect(() => runners.metrics.sweepErrorsAlarm(stack)).not.toThrow();
@@ -2591,6 +2670,9 @@ describe('GithubMicrovmRunners: emitMetrics opt-in gate', () => {
     expect(() => runners.metrics.stuckRunnersReapedAlarm(stack)).not.toThrow();
     expect(() =>
       runners.metrics.capacityRejectedAlarm(stack, 'microvm'),
+    ).not.toThrow();
+    expect(() =>
+      runners.metrics.queuedJobAgeAlarm(stack, 'microvm'),
     ).not.toThrow();
   });
 

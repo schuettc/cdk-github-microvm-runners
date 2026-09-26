@@ -79,6 +79,7 @@ function resetEnv(): void {
       [
         'RUNNER_SET_ID',
         'SCOPE_JSON',
+        'GH_AUTH_KIND',
         'SIZE_CLASSES_JSON',
         'IMAGE_ARN',
         'RUNNER_TABLE',
@@ -2546,5 +2547,44 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
         .filter((l) => typeof l === 'string' && l.includes('"_aws"')),
     ).toHaveLength(0);
     logSpy.mockRestore();
+  });
+
+  it('under PAT auth with org scope the scan is skipped: no repo enumeration, no error counted, and no class metrics emitted (nothing pretends to be 0)', async () => {
+    // listInstallationRepos 403s a PAT, so scanning would count a
+    // sweepErrorsAlarm-tripping error every sweep. Skip it instead \u2014 and do
+    // NOT emit OldestQueuedJobSeconds/QueuedJobs, so the missing-data-breaching
+    // queuedJobAgeAlarm (which the construct refuses to synthesize here) is
+    // never fed a fake healthy 0.
+    twoClassEnv();
+    setEnv({
+      GH_AUTH_KIND: 'pat',
+      SCOPE_JSON: JSON.stringify({ kind: 'org', org: 'acme' }),
+      SIZE_CLASSES_JSON: JSON.stringify({
+        small: { imageArn: IMAGE_ARN_DEFAULT },
+        large: { imageArn: IMAGE_ARN_DEFAULT },
+      }),
+    });
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    const errorSpy = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    // Scan never started: no repo enumeration, no run reads.
+    expect(listInstallationReposMock).not.toHaveBeenCalled();
+    expect(listWorkflowRunsMock).not.toHaveBeenCalled();
+    // No per-class queued-job envelopes emitted (nothing claims 0).
+    expect(classEnvelope(logSpy, 'small')).toBeUndefined();
+    expect(classEnvelope(logSpy, 'large')).toBeUndefined();
+    // The per-sweep envelope still reports, and its errors count is 0 \u2014 the
+    // skip is not an error.
+    const sweep = emfLines(logSpy).find((e) => e.errors !== undefined);
+    expect(sweep?.errors).toBe(0);
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });

@@ -1539,6 +1539,17 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
   if (!metricsEnabled()) {
     return;
   }
+  // PAT auth + org scope: the scan enumerates the org's repos via the App
+  // installation-repositories endpoint, which a personal access token cannot
+  // call (GitHub 403s). Skip the scan entirely rather than 403 on every sweep
+  // and count a `sweepErrorsAlarm`-tripping error, and do NOT emit the class
+  // metrics \u2014 emitting 0s here would let the missing-data-breaching
+  // `queuedJobAgeAlarm` look healthy when the scan never actually ran. The
+  // construct refuses to synthesize `queuedJobAgeAlarm` in this configuration,
+  // so no alarm depends on these metrics.
+  if (process.env.GH_AUTH_KIND === 'pat' && ctx.scope.kind === 'org') {
+    return;
+  }
   const classLabels = Object.keys(readSizeClasses());
   const states = new Map<string, ClassQueueState>(
     classLabels.map((label) => [

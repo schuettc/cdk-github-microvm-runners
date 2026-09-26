@@ -175,8 +175,8 @@ When no launch happens in the first place — a webhook that was misrouted or
 dropped, a GitHub App failure, a launch bug, or a MicroVM quota wall — there is
 no VM to reap and no error to count, and the job just sits `queued` with nothing
 anywhere saying so. This alarm reads the janitor's queued-job measurement and
-fires when a class's oldest queued job crosses 20 minutes over a single
-5-minute period (read as a maximum):
+fires when a class's oldest queued job crosses 20 minutes over its aggregation
+period (read as a maximum):
 
 ```ts
 runners.metrics.queuedJobAgeAlarm(stack, 'microvm');
@@ -185,10 +185,30 @@ runners.metrics.queuedJobAgeAlarm(stack, 'microvm');
 It is the one alarm here that **treats missing data as breaching**. Its metric
 is emitted every sweep for every class — 0 when nothing is queued — so the
 metric going absent does not mean "nothing queued", it means the janitor itself
-has stopped reporting, which is its own failure worth paging on. It is per
-class, so it takes the class label and builds its alarm under an id unique to
-that label — call it once for each class you want watched, in the same scope,
-and the alarms do not collide.
+has stopped reporting, which is its own failure worth paging on. A sweep that
+overruns its Lambda timeout writes no datapoint for that period, so a
+persistently slow or crashing janitor reads exactly like a silent one and pages
+— that is the intended "janitor went silent" signal, not a false alarm.
+
+Because absence pages, the period has to be long enough that every period it
+evaluates holds at least one sweep's datapoint. Its default period is therefore
+**not** the usual 5 minutes but `max(5 min, 2 × janitorInterval)` rounded up to
+a whole minute — 10 minutes at the default 5-minute `janitorInterval`, 20
+minutes at a 10-minute one — so a single missed sweep still leaves a datapoint
+in the period and cannot page. A `period` you pass that is shorter than
+`janitorInterval` is rejected at synth: it would guarantee empty periods and a
+permanent false ALARM.
+
+Under **PAT auth with org scope** this alarm is unavailable and throws at synth.
+The queued-job scan enumerates the org's repositories through the App
+installation-repositories endpoint, which a personal access token cannot call
+(GitHub returns 403), so the janitor skips the scan and never emits
+`oldestQueuedJobSeconds`. `emitMetrics: true` in that configuration also raises a
+synth-time warning saying so. Use a GitHub App, or scope the runner set to an
+explicit repository list (`RunnerScope.repos([...])`), to watch queued-job age.
+It is per class, so it takes the class label and builds its alarm under an id
+unique to that label — call it once for each class you want watched, in the same
+scope, and the alarms do not collide.
 
 Those five read metrics the handlers emit, so they require `emitMetrics: true`
 and throw at synth without it.
@@ -199,9 +219,10 @@ sweep-errors, stuck-launch, and capacity-rejected alarms, all of which watch
 signals that only mean something when they persist — and
 `period: Duration.minutes(5)`, except `stuckRunnersReapedAlarm`, which defaults
 to `threshold: 6` over `Duration.minutes(15)`, and `queuedJobAgeAlarm`, which
-defaults to `threshold: 1200` (seconds). All compare with `>=` and treat missing
-data as not breaching — except `queuedJobAgeAlarm`, which treats it as breaching.
-Pass any of the three to change it:
+defaults to `threshold: 1200` (seconds) over `max(5 min, 2 × janitorInterval)`.
+All compare with `>=` and treat missing data as not breaching — except
+`queuedJobAgeAlarm`, which treats it as breaching. Pass any of the three to
+change it:
 
 ```ts
 runners.metrics.sweepErrorsAlarm(stack, {

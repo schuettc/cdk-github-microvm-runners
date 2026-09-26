@@ -42,12 +42,13 @@ concurrency:
   group: runner-version-watch
   cancel-in-progress: false
 
-# Least privilege for the default token: it reads the repo (checkout) and opens
-# the staleness issue. The bump PR is created with the App token generated below,
-# not this token, so it triggers CI — but the App token is scoped to only the
-# permissions it needs on its own step.
+# Least privilege for the default token: it reads the repo (checkout), lists open
+# PRs for the staleness backstop, and opens the staleness issue. The bump PR is
+# created with the App token generated below, not this token, so it triggers CI —
+# but the App token is scoped to only the permissions it needs on its own step.
 permissions:
   contents: read
+  pull-requests: read
   issues: write
 
 jobs:
