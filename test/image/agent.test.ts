@@ -15,6 +15,9 @@ import { join } from 'node:path';
 
 interface Scenarios {
   args: string[];
+  mainViaSymlink: boolean;
+  notMainWhenImported: boolean;
+  notMainWhenNoArgv: boolean;
   readyOnProbeSuccess: { ready: boolean; calls: number };
   timeout: { ready: boolean; calls: number };
   noDockerd: { started: string[]; probes: number };
@@ -40,6 +43,22 @@ describe('buildRunnerArgs', () => {
     const i = s.args.indexOf('--jitconfig');
     expect(i).toBeGreaterThanOrEqual(0);
     expect(s.args[i + 1]).toBe('JITCFG');
+  });
+});
+
+describe('isMainModule (entrypoint guard)', () => {
+  it('is true when argv[1] is a symlink to the agent (realpath-safe)', () => {
+    // Node realpaths import.meta.url but not argv[1]; comparing realpaths
+    // keeps the guard true through the symlink, so the server still starts.
+    expect(s.mainViaSymlink).toBe(true);
+  });
+
+  it('is false when the agent is imported from another script', () => {
+    expect(s.notMainWhenImported).toBe(false);
+  });
+
+  it('is false when argv[1] is missing', () => {
+    expect(s.notMainWhenNoArgv).toBe(false);
   });
 });
 

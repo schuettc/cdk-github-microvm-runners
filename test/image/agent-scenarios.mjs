@@ -9,12 +9,39 @@ import {
   buildRunnerArgs,
   waitForDockerReady,
   decideAndStartRunner,
+  isMainModule,
 } from '../../src/image/assets/agent.mjs';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { realpathSync, symlinkSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 async function run() {
   const out = {};
 
   out.args = buildRunnerArgs('JITCFG');
+
+  // Entrypoint guard is realpath-safe. Node realpaths import.meta.url but not
+  // argv[1], so running the agent through a symlink (argv[1] = the link, the
+  // meta URL = the real file) must still be recognised as the main module.
+  {
+    const agentPath = fileURLToPath(
+      new URL('../../src/image/assets/agent.mjs', import.meta.url),
+    );
+    // What Node actually presents as import.meta.url: the realpath'd file.
+    const metaUrl = pathToFileURL(realpathSync(agentPath)).href;
+    const dir = mkdtempSync(join(tmpdir(), 'agent-guard-'));
+    const link = join(dir, 'agent-link.mjs');
+    symlinkSync(agentPath, link);
+    const other = join(dir, 'other-script.mjs');
+    writeFileSync(other, '');
+    // argv[1] is a symlink to the agent -> main module (server should start).
+    out.mainViaSymlink = isMainModule(metaUrl, link);
+    // Imported from another script -> not the main module.
+    out.notMainWhenImported = isMainModule(metaUrl, other);
+    // Missing argv[1] -> not the main module.
+    out.notMainWhenNoArgv = isMainModule(metaUrl, undefined);
+  }
 
   // Ready as soon as the probe succeeds; stops probing (clock never advances).
   {

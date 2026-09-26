@@ -21,8 +21,8 @@
 // the looser suffix match here.
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { openSync, mkdirSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { openSync, mkdirSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const PORT = 8080;
 const READY_PATH = '/aws/lambda-microvms/runtime/v1/ready';
@@ -263,7 +263,12 @@ function handleRequest(req, res) {
       // timeout can never kill the VM while we wait for the daemon.
       res.writeHead(200);
       res.end();
-      decideAndStartRunner(jitConfig);
+      // Fire-and-forget by design (the /run hook is already acked), but a
+      // rejection must never go unhandled — log it so a failed start is
+      // diagnosable rather than a silent UnhandledPromiseRejection.
+      decideAndStartRunner(jitConfig).catch((e) =>
+        console.log(`runner start failed: ${e}`),
+      );
       return;
     }
     res.writeHead(404);
@@ -271,11 +276,29 @@ function handleRequest(req, res) {
   });
 }
 
+/**
+ * True when this module is the process entrypoint (run directly), false when
+ * it is imported. Compares REALPATHS, not the raw URLs: Node resolves symlinks
+ * in `import.meta.url` but leaves `process.argv[1]` as given, so when the agent
+ * is launched through a symlink (its normal case — `/opt/microvm-runner/agent.mjs`
+ * may itself be a link) a raw `import.meta.url === pathToFileURL(argv1)`
+ * compare is false and the server silently never starts. Guards a missing
+ * `argv1` and any resolve error (a path that can't be realpath'd is not the
+ * entrypoint). Exported so the guard is unit-testable without binding a port.
+ */
+export function isMainModule(metaUrl, argv1) {
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
 // Start the HTTP server only when run as the entrypoint, never on import —
 // so a unit test can import the exported pure helpers above without binding a
 // port or serving hooks.
-const isMain = import.meta.url === pathToFileURL(process.argv[1] ?? '').href;
-if (isMain) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   const server = createServer(handleRequest);
   server.listen(PORT, () => console.log(`microvm-runner agent on ${PORT}`));
 }
