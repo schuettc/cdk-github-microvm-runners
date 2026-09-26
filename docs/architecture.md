@@ -71,9 +71,13 @@ flowchart TD
    for a runner name the table does not know is a no-op.
 
 5. The **MicroVM** runs exactly one job — GitHub's just-in-time runners are
-   single-use. The runner deregisters itself from GitHub when the job ends, and
-   the VM itself is terminated from outside, either by the `terminate` intent
-   above or by the janitor.
+   single-use. Its in-VM agent takes the pushed configuration and starts the
+   runner with self-update disabled; on a Docker-capable image it first waits
+   for `dockerd` to answer, so a job never starts against a daemon that has not
+   finished coming up (see [Runner images](images.md#containers-in-a-job)). The
+   runner deregisters itself from GitHub when the job ends, and the VM itself is
+   terminated from outside, either by the `terminate` intent above or by the
+   janitor.
 
 6. The **janitor Lambda** runs on a schedule and reconciles the runner set. It
    terminates VMs that GitHub has lost track of or that never received a job,
