@@ -52,23 +52,26 @@ per sweep. Two runner sets in the same account and region report separately.
 | `stuckLaunchesRecovered()` | dead-lettered launches re-driven onto the queue     |
 | `stuckClaimsRelaunched()`  | launch claims taken over after an attempt died      |
 | `errors()`                 | failures the sweep isolated and continued past      |
+| `queuedJobScanTruncated()` | 1 when a sweep hit its GitHub-listing cap mid-scan  |
 
 **Per runner class**, dimensioned by `RunnerSetId` and `SizeClass`, the launcher
 and warm pool emit one envelope per event. Each accessor takes the class label:
 
-| Accessor                       | Reports                                                      |
-| ------------------------------ | ------------------------------------------------------------ |
-| `warmHit(label)`               | launches served by a pre-booted VM                           |
-| `coldBoot(label)`              | launches that booted a new VM                                |
-| `capacityRejected(label)`      | launches refused because the account hit its quota           |
-| `cancelledBeforeLaunch(label)` | launches skipped because the job had already stopped waiting |
-| `warmThrottled(label)`         | warm-path attempts that fell back to a cold boot             |
-| `warmSpinUpMs(label)`          | spin-up time on the warm path                                |
-| `coldSpinUpMs(label)`          | spin-up time on the cold path                                |
-| `poolCurrent(label)`           | VMs currently in the warm pool                               |
-| `poolTarget(label)`            | VMs the pool is converging toward                            |
-| `poolLaunched(label)`          | VMs a sweep added to the pool                                |
-| `poolLaunchFailed(label)`      | pool launches that failed                                    |
+| Accessor                        | Reports                                                      |
+| ------------------------------- | ------------------------------------------------------------ |
+| `warmHit(label)`                | launches served by a pre-booted VM                           |
+| `coldBoot(label)`               | launches that booted a new VM                                |
+| `capacityRejected(label)`       | launches refused because the account hit its quota           |
+| `cancelledBeforeLaunch(label)`  | launches skipped because the job had already stopped waiting |
+| `warmThrottled(label)`          | warm-path attempts that fell back to a cold boot             |
+| `warmSpinUpMs(label)`           | spin-up time on the warm path                                |
+| `coldSpinUpMs(label)`           | spin-up time on the cold path                                |
+| `poolCurrent(label)`            | VMs currently in the warm pool                               |
+| `poolTarget(label)`             | VMs the pool is converging toward                            |
+| `poolLaunched(label)`           | VMs a sweep added to the pool                                |
+| `poolLaunchFailed(label)`       | pool launches that failed                                    |
+| `oldestQueuedJobSeconds(label)` | seconds the class's oldest queued job has waited (0 if none) |
+| `queuedJobs(label)`             | jobs this class owns that are still queued                   |
 
 ```ts
 runners.metrics.capacityRejected('microvm');
@@ -87,12 +90,22 @@ the run it superseded. A count that dwarfs `coldBoot` says the workflows
 feeding this runner set are cancelled more often than they finish, which is
 usually a question about their triggers.
 
-The two spin-up metrics and `poolCurrent`/`poolTarget` read as averages, since
-each reports an absolute value; the rest are sums.
+The two spin-up metrics, `poolCurrent`/`poolTarget`, and
+`oldestQueuedJobSeconds`/`queuedJobs` read as averages, since each reports an
+absolute value; the rest are sums.
+
+`oldestQueuedJobSeconds` and `queuedJobs` come from a read-only pass the janitor
+makes over GitHub each sweep (only with `emitMetrics` on), asking how long jobs
+have been waiting per class. A job counts toward a class when every runner label
+it requests beyond `self-hosted` is that class's label — the same match GitHub
+makes — so another runner set's jobs in the same org do not count here. The pass
+is bounded per sweep; when it hits its listing cap it stops and reports
+`queuedJobScanTruncated` = 1, so a sweep that could not read everything says so
+rather than under-reporting silently.
 
 ## Ready-made alarms
 
-Five methods build a `cloudwatch.Alarm` carrying a default threshold. An alarm
+Six methods build a `cloudwatch.Alarm` carrying a default threshold. An alarm
 exists where you call one and give it a scope:
 
 ```ts
@@ -149,7 +162,31 @@ runners.metrics.capacityRejectedAlarm(stack, 'small');
 runners.metrics.capacityRejectedAlarm(stack, 'large');
 ```
 
-Those four read metrics the handlers emit, so they require `emitMetrics: true`
+`queuedJobAgeAlarm(scope, label)` watches one runner class's
+`oldestQueuedJobSeconds`. It is the alarm for a job that never gets a runner at
+all — the failure the others structurally cannot see. The reap and
+stuck-launch alarms all watch things that happen _after_ a launch: a VM that
+registered and went idle, a launch that dead-lettered, an error a sweep counted.
+When no launch happens in the first place — a webhook that was misrouted or
+dropped, a GitHub App failure, a launch bug, or a MicroVM quota wall — there is
+no VM to reap and no error to count, and the job just sits `queued` with nothing
+anywhere saying so. This alarm reads the janitor's queued-job measurement and
+fires when a class's oldest queued job crosses 20 minutes over a single
+5-minute period (read as a maximum):
+
+```ts
+runners.metrics.queuedJobAgeAlarm(stack, 'microvm');
+```
+
+It is the one alarm here that **treats missing data as breaching**. Its metric
+is emitted every sweep for every class — 0 when nothing is queued — so the
+metric going absent does not mean "nothing queued", it means the janitor itself
+has stopped reporting, which is its own failure worth paging on. It is per
+class, so it takes the class label and builds its alarm under an id unique to
+that label — call it once for each class you want watched, in the same scope,
+and the alarms do not collide.
+
+Those five read metrics the handlers emit, so they require `emitMetrics: true`
 and throw at synth without it.
 
 Each takes an optional `RunnerAlarmOptions { threshold?, evaluationPeriods?,
@@ -157,8 +194,10 @@ period? }`. The defaults are `threshold: 1`, `evaluationPeriods: 1` — 3 for th
 sweep-errors, stuck-launch, and capacity-rejected alarms, all of which watch
 signals that only mean something when they persist — and
 `period: Duration.minutes(5)`, except `stuckRunnersReapedAlarm`, which defaults
-to `threshold: 6` over `Duration.minutes(15)`. All compare with `>=` and treat
-missing data as not breaching. Pass any of the three to change it:
+to `threshold: 6` over `Duration.minutes(15)`, and `queuedJobAgeAlarm`, which
+defaults to `threshold: 1200` (seconds). All compare with `>=` and treat missing
+data as not breaching — except `queuedJobAgeAlarm`, which treats it as breaching.
+Pass any of the three to change it:
 
 ```ts
 runners.metrics.sweepErrorsAlarm(stack, {
@@ -168,8 +207,8 @@ runners.metrics.sweepErrorsAlarm(stack, {
 ```
 
 Each builds its alarm under a fixed construct id, so call a given one once per
-scope — except `capacityRejectedAlarm`, whose id carries the class label, so
-it is called once per class instead.
+scope — except `capacityRejectedAlarm` and `queuedJobAgeAlarm`, whose ids carry
+the class label, so they are called once per class instead.
 
 ## What a refused runner looks like
 

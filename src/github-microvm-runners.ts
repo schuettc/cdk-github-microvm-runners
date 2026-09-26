@@ -541,6 +541,31 @@ export class GithubMicrovmRunnersMetrics {
     return this.emfMetric('errors');
   }
 
+  /**
+   * Janitor per-class gauge (seconds): how long the oldest queued job this
+   * class owns has waited, measured read-only each sweep, or 0 when the class
+   * has nothing queued. A job is owned by a class when every runner label it
+   * requests beyond `self-hosted` is that class's label — GitHub's own
+   * matching — so another runner set's jobs are excluded. Emitted every sweep
+   * for every class, which is what lets {@link queuedJobAgeAlarm} treat missing
+   * data as breaching.
+   *
+   * Reported as an average across a period; the alarm reads it as a maximum.
+   */
+  public oldestQueuedJobSeconds(runnerClassLabel: string): cloudwatch.Metric {
+    return this.classGaugeMetric('OldestQueuedJobSeconds', runnerClassLabel);
+  }
+
+  /** Janitor per-class gauge: queued jobs this class owned as of the last sweep (see {@link oldestQueuedJobSeconds} for ownership). */
+  public queuedJobs(runnerClassLabel: string): cloudwatch.Metric {
+    return this.classGaugeMetric('QueuedJobs', runnerClassLabel);
+  }
+
+  /** Janitor per-sweep flag: 1 when a sweep hit its GitHub-listing cap and did not scan every queued job, so `oldestQueuedJobSeconds`/`queuedJobs` may under-report that sweep. */
+  public queuedJobScanTruncated(): cloudwatch.Metric {
+    return this.emfMetric('QueuedJobScanTruncated');
+  }
+
   // --- Launcher metrics (per runner class) --------------------------------
   // `src/handlers/launcher.ts`'s `emitLaunchMetrics` emits these dimensioned
   // by `RunnerSetId` + `SizeClass`, so each accessor takes the runner-class
@@ -870,6 +895,48 @@ export class GithubMicrovmRunnersMetrics {
   }
 
   /**
+   * Alarm when a runner class has a job that has waited queued far longer than
+   * a runner should take to appear — the signal that NO launch happened at
+   * all, which the reap-based alarms structurally cannot catch. A misrouted or
+   * dropped webhook, a GitHub App failure, a launch bug, or a MicroVM quota
+   * wall all leave the same fingerprint: a job sits `queued` and no VM is ever
+   * created for it, so there is no stuck runner to reap and no error to count.
+   *
+   * The janitor measures the oldest queued job per class every sweep, so this
+   * fires when a class's oldest queued job crosses the threshold (20 minutes
+   * by default) over a single 5-minute period, read as a maximum. It also
+   * **treats missing data as breaching**: the metric is emitted every sweep,
+   * so its absence means the janitor itself has gone silent — itself a failure
+   * worth paging on — rather than "nothing queued".
+   *
+   * `oldestQueuedJobSeconds` is dimensioned per runner class, so this builds
+   * one alarm per `runnerClassLabel` under an id unique to that label — call it
+   * once per class you want watched, in the same scope, without collision.
+   *
+   * Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+   * without it.
+   * @default threshold 1200 (seconds), 1 evaluation period, 5-minute period, missing data breaching
+   */
+  public queuedJobAgeAlarm(
+    scope: Construct,
+    runnerClassLabel: string,
+    options: RunnerAlarmOptions = {},
+  ): cloudwatch.Alarm {
+    this.requireEmittedMetrics('queuedJobAgeAlarm', 'OldestQueuedJobSeconds');
+    return this.buildAlarm(
+      scope,
+      `QueuedJobAgeAlarm-${runnerClassLabel}`,
+      this.oldestQueuedJobSeconds(runnerClassLabel).with({
+        statistic: 'Maximum',
+      }),
+      `MicroVM runner set: class '${runnerClassLabel}' has a job queued far longer than a runner should take to appear, or the janitor has gone silent (no launch happened: webhook misrouted, App failure, launch bug, or quota?).`,
+      options,
+      1200,
+      cloudwatch.TreatMissingData.BREACHING,
+    );
+  }
+
+  /**
    * Guard for the alarms whose metric is EMF-emitted by a handler. With
    * `GithubMicrovmRunnersProps.emitMetrics` off the handlers write no
    * metric at all, and these alarms use
@@ -898,6 +965,12 @@ export class GithubMicrovmRunnersMetrics {
     description: string,
     options: RunnerAlarmOptions,
     defaultThreshold: number,
+    // Most alarms treat missing data as NOT breaching (a metric that never
+    // reports should not page). `queuedJobAgeAlarm` is the exception — its
+    // metric is emitted every sweep, so absence means the janitor is silent,
+    // which IS the failure — so it passes BREACHING here.
+    treatMissingData: cloudwatch.TreatMissingData = cloudwatch.TreatMissingData
+      .NOT_BREACHING,
   ): cloudwatch.Alarm {
     const period = options.period ?? Duration.minutes(5);
     return new cloudwatch.Alarm(scope, id, {
@@ -906,7 +979,7 @@ export class GithubMicrovmRunnersMetrics {
       evaluationPeriods: options.evaluationPeriods ?? 1,
       comparisonOperator:
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      treatMissingData,
       alarmDescription: description,
     });
   }

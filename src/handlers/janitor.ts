@@ -51,12 +51,15 @@ import {
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
-import { emitEmf } from './shared/emf.js';
+import { emitEmf, metricsEnabled } from './shared/emf.js';
 import {
   deleteRunner,
   getRunner,
   getWorkflowJob,
+  listInstallationRepos,
   listRunners,
+  listWorkflowRuns,
+  listWorkflowRunJobs,
   type GithubRunner,
   type ScopeTarget,
 } from './shared/github-client.js';
@@ -170,8 +173,14 @@ interface JanitorContext {
   runnersByTarget: Map<string, Map<string, GithubRunner>>;
 }
 
-const { requireEnv, numEnv, readScope, runnerSetImageArns, resolveTarget } =
-  runnerSetConfigFor('janitor');
+const {
+  requireEnv,
+  numEnv,
+  readScope,
+  readSizeClasses,
+  runnerSetImageArns,
+  resolveTarget,
+} = runnerSetConfigFor('janitor');
 
 let cachedDdbClient: DynamoDBClient | undefined;
 let cachedSqsClient: SQSClient | undefined;
@@ -1303,6 +1312,283 @@ async function recoverStuckLaunches(ctx: JanitorContext): Promise<void> {
   }
 }
 
+/**
+ * Per-sweep cap on GitHub run listings (`listWorkflowRuns` calls) the
+ * queued-job scan makes before it stops and flags the scan truncated. Bounds
+ * API cost on the shared per-installation rate-limit bucket the janitor's
+ * safety-critical reap reads (`listRunners`/`getRunner`) also draw from — an
+ * uncapped scan on a busy org would exhaust the bucket and stall reaping. A
+ * larger backlog is caught by the truncation signal, never under-reported
+ * silently.
+ */
+const QUEUED_RUN_LISTING_CAP = 100;
+
+/** Per-sweep cap on GitHub job listings (`listWorkflowRunJobs` calls) the queued-job scan makes; see {@link QUEUED_RUN_LISTING_CAP}. */
+const QUEUED_JOB_LISTING_CAP = 200;
+
+/** The implicit label GitHub gives every self-hosted runner; excluded (case-insensitively) from a job's requested-label set before class ownership is decided. */
+const SELF_HOSTED_LABEL = 'self-hosted';
+
+/** The workflow-run statuses that can contain a still-`queued` job (a queued job can live inside an `in_progress` run). */
+const QUEUED_JOB_RUN_STATUSES = ['queued', 'in_progress'] as const;
+
+/** A repo to scan for queued jobs, with the scope target that authenticates the reads. */
+interface RepoToScan {
+  owner: string;
+  repo: string;
+  target: ScopeTarget;
+}
+
+/** Running accumulator for one class's queued-job measurements over a sweep. */
+interface ClassQueueState {
+  oldestQueuedJobSeconds: number;
+  queuedJobs: number;
+}
+
+/** Mutable per-sweep counters for the listing caps and the truncation flag. */
+interface QueueScanBudget {
+  runListings: number;
+  jobListings: number;
+  truncated: boolean;
+}
+
+/**
+ * Which registered class owns a queued job, or `undefined` if none does.
+ *
+ * Ownership mirrors GitHub's own runner-label matching for the runners this
+ * construct registers: a class `C` registers runners carrying `self-hosted`
+ * plus its single `C` label, so GitHub assigns `C` a job only when every
+ * label the job requests is one of those. Strip `self-hosted`
+ * (case-insensitively — the one implicit label) and the job is owned by `C`
+ * iff every remaining requested label is `C`. A job that also requests a
+ * label this set does not register (an extra custom label, another class's
+ * label) is owned by no class here — exactly as GitHub would refuse to route
+ * it to a `C` runner — so another runner set's jobs in the same org never
+ * trip this set's alarm. A job requesting only `self-hosted` (no class label)
+ * is owned by no class either.
+ */
+function classForQueuedJob(
+  jobLabels: string[],
+  classLabels: string[],
+): string | undefined {
+  const requested = jobLabels.filter(
+    (l) => l.toLowerCase() !== SELF_HOSTED_LABEL,
+  );
+  if (requested.length === 0) {
+    return undefined;
+  }
+  return classLabels.find((c) => requested.every((l) => l === c));
+}
+
+/**
+ * How long a queued job has waited, in whole seconds (never negative). Dated
+ * from the job's own `createdAt` (its enqueue time), falling back to its
+ * `startedAt`, then the run's `createdAt` — whichever GitHub supplies first.
+ * An unparseable/absent origin reads as 0 rather than poisoning the max with
+ * `NaN`.
+ */
+function queuedJobAgeSeconds(
+  job: { createdAt?: string; startedAt?: string },
+  runCreatedAt: string | undefined,
+  nowMs: number,
+): number {
+  const origin = job.createdAt ?? job.startedAt ?? runCreatedAt;
+  if (!origin) {
+    return 0;
+  }
+  const originMs = Date.parse(origin);
+  if (Number.isNaN(originMs)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor((nowMs - originMs) / 1000));
+}
+
+/** The repos this sweep scans for queued jobs: every installation repo (org scope) or the configured repos (repos scope). */
+async function reposToScan(ctx: JanitorContext): Promise<RepoToScan[]> {
+  if (ctx.scope.kind === 'org') {
+    const target = resolveTarget(ctx.scope);
+    const repos = await listInstallationRepos(target);
+    return repos.map((r) => ({ owner: r.owner, repo: r.repo, target }));
+  }
+  const scan: RepoToScan[] = [];
+  for (const full of ctx.scope.repos ?? []) {
+    const [owner, repo] = full.split('/');
+    if (owner && repo) {
+      scan.push({ owner, repo, target: resolveTarget(ctx.scope, full) });
+    }
+  }
+  return scan;
+}
+
+/** True once either listing cap is spent; sets `budget.truncated` as a side effect so the caller can stop and the scan is flagged. */
+function queueScanCapReached(budget: QueueScanBudget): boolean {
+  if (
+    budget.runListings >= QUEUED_RUN_LISTING_CAP ||
+    budget.jobListings >= QUEUED_JOB_LISTING_CAP
+  ) {
+    budget.truncated = true;
+    return true;
+  }
+  return false;
+}
+
+/** Scan one repo's queued jobs into `states`, respecting the per-sweep listing caps. Throws on a GitHub read failure — the caller isolates it per repo. */
+async function scanRepoQueuedJobs(
+  ctx: JanitorContext,
+  repo: RepoToScan,
+  classLabels: string[],
+  states: Map<string, ClassQueueState>,
+  budget: QueueScanBudget,
+): Promise<void> {
+  for (const status of QUEUED_JOB_RUN_STATUSES) {
+    if (queueScanCapReached(budget)) {
+      return;
+    }
+    const runs = await listWorkflowRuns(
+      repo.target,
+      repo.owner,
+      repo.repo,
+      status,
+    );
+    budget.runListings += 1;
+    for (const run of runs) {
+      if (queueScanCapReached(budget)) {
+        return;
+      }
+      const jobs = await listWorkflowRunJobs(
+        repo.target,
+        repo.owner,
+        repo.repo,
+        run.id,
+      );
+      budget.jobListings += 1;
+      for (const job of jobs) {
+        if (job.status !== 'queued') {
+          continue;
+        }
+        const label = classForQueuedJob(job.labels, classLabels);
+        if (!label) {
+          continue;
+        }
+        const state = states.get(label);
+        if (!state) {
+          continue;
+        }
+        state.queuedJobs += 1;
+        const age = queuedJobAgeSeconds(job, run.createdAt, ctx.nowMs);
+        if (age > state.oldestQueuedJobSeconds) {
+          state.oldestQueuedJobSeconds = age;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Emit one EMF envelope per registered class (`RunnerSetId` + `SizeClass`
+ * dims, matching the launcher/warm-pool per-class metrics) carrying
+ * `OldestQueuedJobSeconds` (in seconds) and `QueuedJobs`, plus one
+ * `RunnerSetId`-only envelope carrying `QueuedJobScanTruncated`. Emitted for
+ * EVERY class every sweep — 0 when nothing is queued — so `queuedJobAgeAlarm`
+ * can treat missing data as breaching (a silent janitor alarms). Opt-in via
+ * `emitEmf`'s gate, like every other janitor metric.
+ */
+function emitQueuedJobMetrics(
+  ctx: JanitorContext,
+  states: Map<string, ClassQueueState>,
+  truncated: boolean,
+): void {
+  for (const [label, state] of states) {
+    emitEmf({
+      namespace: EMF_NAMESPACE,
+      dimensions: ['RunnerSetId', 'SizeClass'],
+      dimensionValues: { RunnerSetId: ctx.runnerSetId, SizeClass: label },
+      metrics: {
+        OldestQueuedJobSeconds: state.oldestQueuedJobSeconds,
+        QueuedJobs: state.queuedJobs,
+      },
+      units: { OldestQueuedJobSeconds: 'Seconds' },
+      timestamp: ctx.nowMs,
+    });
+  }
+  emitEmf({
+    namespace: EMF_NAMESPACE,
+    dimensions: ['RunnerSetId'],
+    dimensionValues: { RunnerSetId: ctx.runnerSetId },
+    metrics: { QueuedJobScanTruncated: truncated ? 1 : 0 },
+    timestamp: ctx.nowMs,
+  });
+}
+
+/**
+ * Read-only sweep phase: measure how long jobs have waited queued for each
+ * registered class and emit the per-class metrics. Catches the failure the
+ * reap-based alarms cannot — a job for which NO runner launch ever happened
+ * (a misrouted webhook, a GitHub App failure, a launch bug, a quota wall) —
+ * and, because the metric is emitted every sweep, a janitor that has gone
+ * silent.
+ *
+ * Gated on `metricsEnabled()`: with metrics off, `emitEmf` writes nothing and
+ * `queuedJobAgeAlarm` cannot synthesize, so the GitHub reads would be pure
+ * cost for no signal. Every per-repo GitHub failure is counted in `errors`
+ * and isolated — an unreadable repo never reports as "0 queued" — and the
+ * class metrics are emitted regardless, so the phase is convergent and the
+ * missing-data alarm stays meaningful.
+ */
+async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
+  if (!metricsEnabled()) {
+    return;
+  }
+  const classLabels = Object.keys(readSizeClasses());
+  const states = new Map<string, ClassQueueState>(
+    classLabels.map((label) => [
+      label,
+      { oldestQueuedJobSeconds: 0, queuedJobs: 0 },
+    ]),
+  );
+  const budget: QueueScanBudget = {
+    runListings: 0,
+    jobListings: 0,
+    truncated: false,
+  };
+  try {
+    const repos = await reposToScan(ctx);
+    for (const repo of repos) {
+      if (queueScanCapReached(budget)) {
+        break;
+      }
+      try {
+        await scanRepoQueuedJobs(ctx, repo, classLabels, states, budget);
+      } catch (err) {
+        // Per-repo isolation: one repo's GitHub read failing must not blank
+        // the others or report it as "0 queued". Count it and carry on.
+        ctx.metrics.errors += 1;
+        console.error(
+          JSON.stringify({
+            scope: 'queued-job-scan',
+            action: 'repo-scan-failed',
+            repo: `${repo.owner}/${repo.repo}`,
+            err: serializeError(err),
+          }),
+        );
+      }
+    }
+  } catch (err) {
+    // Enumerating the repos to scan failed (e.g. listInstallationRepos 403).
+    // Count it and still emit the class metrics below — never leave the
+    // missing-data alarm to fire on a scan that merely could not start.
+    ctx.metrics.errors += 1;
+    console.error(
+      JSON.stringify({
+        scope: 'queued-job-scan',
+        action: 'enumerate-repos-failed',
+        err: serializeError(err),
+      }),
+    );
+  }
+  emitQueuedJobMetrics(ctx, states, budget.truncated);
+}
+
 /** EMF structured-log metric emission: one `console.log` JSON envelope per sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`. Opt-in — `emitEmf` writes nothing unless the runner set set `GithubMicrovmRunnersProps.emitMetrics` (see `shared/emf.ts`'s gate). */
 function emitMetrics(ctx: JanitorContext): void {
   emitEmf({
@@ -1389,6 +1675,22 @@ export async function handler(): Promise<void> {
         }),
       );
     }
+  }
+  // Read-only queued-job-age measurement (opt-in via metricsEnabled inside the
+  // phase). Isolated like every other phase: its EMF envelopes are emitted
+  // BEFORE the per-sweep envelope below, and a phase-level throw here counts
+  // an error and still lets that envelope report it.
+  try {
+    await measureQueuedJobAge(ctx);
+  } catch (err) {
+    ctx.metrics.errors += 1;
+    console.error(
+      JSON.stringify({
+        scope: 'queued-job-scan',
+        action: 'phase-failed',
+        err: serializeError(err),
+      }),
+    );
   }
   // Called on every path: emitMetrics only does
   // console.log(JSON.stringify(numbers)), so it still runs after a phase fault

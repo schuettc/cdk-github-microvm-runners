@@ -27,6 +27,9 @@ jest.mock('../../src/handlers/shared/github-client.js', () => ({
   getRunner: jest.fn(),
   deleteRunner: jest.fn(),
   getWorkflowJob: jest.fn(),
+  listInstallationRepos: jest.fn(),
+  listWorkflowRuns: jest.fn(),
+  listWorkflowRunJobs: jest.fn(),
 }));
 
 import { _resetCachesForTesting, handler } from '../../src/handlers/janitor.js';
@@ -34,7 +37,10 @@ import {
   deleteRunner,
   getRunner,
   getWorkflowJob,
+  listInstallationRepos,
   listRunners,
+  listWorkflowRuns,
+  listWorkflowRunJobs,
 } from '../../src/handlers/shared/github-client.js';
 
 const mvmMock = mockClient(LambdaMicrovmsClient);
@@ -44,6 +50,9 @@ const listRunnersMock = jest.mocked(listRunners);
 const getRunnerMock = jest.mocked(getRunner);
 const deleteRunnerMock = jest.mocked(deleteRunner);
 const getWorkflowJobMock = jest.mocked(getWorkflowJob);
+const listInstallationReposMock = jest.mocked(listInstallationRepos);
+const listWorkflowRunsMock = jest.mocked(listWorkflowRuns);
+const listWorkflowRunJobsMock = jest.mocked(listWorkflowRunJobs);
 
 const JOB_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/1/runners-jobq';
 const DLQ_URL = 'https://sqs.us-east-1.amazonaws.com/1/runners-dlq';
@@ -193,9 +202,17 @@ beforeEach(() => {
   getRunnerMock.mockReset();
   deleteRunnerMock.mockReset();
   getWorkflowJobMock.mockReset();
+  listInstallationReposMock.mockReset();
+  listWorkflowRunsMock.mockReset();
+  listWorkflowRunJobsMock.mockReset();
   listRunnersMock.mockResolvedValue([]);
   getRunnerMock.mockResolvedValue(undefined);
   deleteRunnerMock.mockResolvedValue(undefined);
+  // Default: the queued-job scan finds no repos / no runs, so it emits
+  // all-zero class metrics and touches nothing. Individual tests override.
+  listInstallationReposMock.mockResolvedValue([]);
+  listWorkflowRunsMock.mockResolvedValue([]);
+  listWorkflowRunJobsMock.mockResolvedValue([]);
   // Default: DLQ is empty (ReceiveMessage returns no messages).
   sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
   sqsMock.on(SendMessageCommand).resolves({});
@@ -292,7 +309,12 @@ describe('sweep robustness: phase isolation + guaranteed metric emission (H1)', 
     const line = logSpy.mock.calls
       .map((c: unknown[]) => c[0] as string)
       .reverse()
-      .find((l: string) => typeof l === 'string' && l.includes('"_aws"'));
+      .find(
+        (l: string) =>
+          typeof l === 'string' &&
+          l.includes('"_aws"') &&
+          l.includes('"errors"'),
+      );
     expect(line).toBeDefined();
     return JSON.parse(line as string) as Record<string, number>;
   }
@@ -1431,7 +1453,9 @@ describe('per-item error isolation', () => {
     expect(deletedNames).not.toContain('microvm-runner-x-aaaaaaaa');
 
     const logLines = logSpy.mock.calls.map((c) => c[0] as string);
-    const emfLine = logLines.find((line) => line.includes('"_aws"'));
+    const emfLine = logLines.find(
+      (line) => line.includes('"_aws"') && line.includes('"errors"'),
+    );
     expect(emfLine).toBeDefined();
     const parsed = JSON.parse(emfLine as string) as { errors: number };
     expect(parsed.errors).toBeGreaterThanOrEqual(1);
@@ -1498,7 +1522,7 @@ describe('per-item error isolation', () => {
 
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"'));
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
     const parsed = JSON.parse(emfLine as string) as {
       errors: number;
       imageVersionsPruned: number;
@@ -1538,7 +1562,7 @@ describe('EMF metrics output', () => {
 
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"'));
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
     expect(emfLine).toBeDefined();
     const parsed = JSON.parse(emfLine as string) as {
       _aws: {
@@ -1675,7 +1699,7 @@ describe('recoverStuckLaunches: DLQ recovery on control-plane outage recovery', 
 
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"'));
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
     const parsed = JSON.parse(emfLine as string) as {
       stuckLaunchesRecovered: number;
       errors: number;
@@ -1728,7 +1752,7 @@ describe('recoverStuckLaunches: DLQ recovery on control-plane outage recovery', 
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(0);
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"'));
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
     const parsed = JSON.parse(emfLine as string) as {
       stuckLaunchesRecovered: number;
       errors: number;
@@ -1800,7 +1824,7 @@ describe('recoverStuckLaunches: DLQ recovery on control-plane outage recovery', 
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(0);
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"'));
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
     const parsed = JSON.parse(emfLine as string) as { errors: number };
     expect(parsed.errors).toBe(0);
     logSpy.mockRestore();
@@ -1875,7 +1899,7 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
     });
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"'));
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
     const parsed = JSON.parse(emfLine as string) as {
       stuckClaimsRelaunched: number;
     };
@@ -2000,7 +2024,7 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
 
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"'));
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
     const parsed = JSON.parse(emfLine as string) as {
       errors: number;
       stuckClaimsRelaunched: number;
@@ -2034,5 +2058,292 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
     await handler();
 
     expect(getWorkflowJobMock.mock.calls.length).toBeLessThanOrEqual(CAP);
+  });
+});
+
+describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
+  function emfLines(
+    logSpy: ReturnType<typeof jest.spyOn>,
+  ): Record<string, unknown>[] {
+    return logSpy.mock.calls
+      .map((c: unknown[]) => c[0] as string)
+      .filter((l: string) => typeof l === 'string' && l.includes('"_aws"'))
+      .map((l: string) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  function classEnvelope(
+    logSpy: ReturnType<typeof jest.spyOn>,
+    label: string,
+  ): Record<string, unknown> | undefined {
+    return emfLines(logSpy).find(
+      (e) => e.SizeClass === label && e.OldestQueuedJobSeconds !== undefined,
+    );
+  }
+
+  function truncatedEnvelope(
+    logSpy: ReturnType<typeof jest.spyOn>,
+  ): Record<string, unknown> | undefined {
+    return emfLines(logSpy).find((e) => e.QueuedJobScanTruncated !== undefined);
+  }
+
+  /** Wire the org-scope installation repos + a per-status run listing. */
+  function setRepos(repos: { owner: string; repo: string }[]): void {
+    listInstallationReposMock.mockResolvedValue(repos);
+  }
+
+  function twoClassEnv(): void {
+    setEnv({
+      SIZE_CLASSES_JSON: JSON.stringify({
+        small: { imageArn: IMAGE_ARN_DEFAULT },
+        large: { imageArn: IMAGE_ARN_DEFAULT },
+      }),
+    });
+  }
+
+  it('a queued job owned by a class sets OldestQueuedJobSeconds to its age and QueuedJobs to the count; other classes read 0', async () => {
+    twoClassEnv();
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
+      status === 'queued'
+        ? [{ id: 11, status: 'queued', createdAt: undefined }]
+        : [],
+    );
+    listWorkflowRunJobsMock.mockResolvedValue([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'small'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(900),
+      },
+      {
+        id: 102,
+        status: 'queued',
+        labels: ['self-hosted', 'small'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(300),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const small = classEnvelope(logSpy, 'small');
+    expect(small?.OldestQueuedJobSeconds).toBe(900);
+    expect(small?.QueuedJobs).toBe(2);
+    const large = classEnvelope(logSpy, 'large');
+    expect(large?.OldestQueuedJobSeconds).toBe(0);
+    expect(large?.QueuedJobs).toBe(0);
+    // Per-class envelope carries RunnerSetId + SizeClass, like launcher metrics.
+    expect(small?.RunnerSetId).toBe(RUNNER_SET_ID);
+    const meta = (
+      small?._aws as { CloudWatchMetrics: { Dimensions: string[][] }[] }
+    ).CloudWatchMetrics[0];
+    expect(meta.Dimensions).toEqual([['RunnerSetId', 'SizeClass']]);
+    logSpy.mockRestore();
+  });
+
+  it('a job requesting a label this set does not register is owned by no class (never trips this set)', async () => {
+    twoClassEnv();
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
+      status === 'queued'
+        ? [{ id: 11, status: 'queued', createdAt: undefined }]
+        : [],
+    );
+    listWorkflowRunJobsMock.mockResolvedValue([
+      {
+        // 'small' matches a class, but 'gpu' is a label this set never
+        // registers, so GitHub would never route it to a 'small' runner.
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'small', 'gpu'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(900),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBe(0);
+    expect(classEnvelope(logSpy, 'small')?.OldestQueuedJobSeconds).toBe(0);
+    logSpy.mockRestore();
+  });
+
+  it('in_progress/completed jobs never count, but a still-queued job inside an in_progress run does', async () => {
+    setEnv();
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
+      status === 'in_progress'
+        ? [{ id: 22, status: 'in_progress', createdAt: undefined }]
+        : [],
+    );
+    listWorkflowRunJobsMock.mockResolvedValue([
+      {
+        id: 201,
+        status: 'in_progress',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: isoMinusSeconds(60),
+        createdAt: isoMinusSeconds(1200),
+      },
+      {
+        id: 202,
+        status: 'completed',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: isoMinusSeconds(600),
+        createdAt: isoMinusSeconds(1200),
+      },
+      {
+        // still queued even though its run is in_progress — counts.
+        id: 203,
+        status: 'queued',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(1500),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const microvm = classEnvelope(logSpy, 'microvm');
+    expect(microvm?.QueuedJobs).toBe(1);
+    expect(microvm?.OldestQueuedJobSeconds).toBe(1500);
+    logSpy.mockRestore();
+  });
+
+  it('repos scope scans the configured repos, not an installation listing', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({
+        kind: 'repos',
+        repos: ['acme/widgets', 'acme/gadgets'],
+      }),
+    });
+    listWorkflowRunsMock.mockImplementation(async (_t, _o, _r, status) =>
+      status === 'queued'
+        ? [{ id: 11, status: 'queued', createdAt: undefined }]
+        : [],
+    );
+    listWorkflowRunJobsMock.mockResolvedValue([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(120),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(listInstallationReposMock).not.toHaveBeenCalled();
+    const scannedRepos = listWorkflowRunsMock.mock.calls.map((c) => c[2]);
+    expect(new Set(scannedRepos)).toEqual(new Set(['widgets', 'gadgets']));
+    // Two repos each with one queued microvm job.
+    expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(2);
+    logSpy.mockRestore();
+  });
+
+  it('one repo returning 403 is counted in errors and isolated; the other repos are still scanned and class metrics still emitted', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({
+        kind: 'repos',
+        repos: ['acme/broken', 'acme/widgets'],
+      }),
+    });
+    listWorkflowRunsMock.mockImplementation(async (_t, owner, repo, status) => {
+      if (repo === 'broken') {
+        throw new Error('github-client: GitHub API error 403');
+      }
+      return status === 'queued'
+        ? [{ id: 11, status: 'queued', createdAt: undefined }]
+        : [];
+    });
+    listWorkflowRunJobsMock.mockResolvedValue([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(720),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await handler();
+
+    // The readable repo was still scanned and reported.
+    expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(1);
+    expect(classEnvelope(logSpy, 'microvm')?.OldestQueuedJobSeconds).toBe(720);
+    // The unreadable repo bumped the sweep's errors counter.
+    const perSweep = emfLines(logSpy).find((e) => e.errors !== undefined) as {
+      errors: number;
+    };
+    expect(perSweep.errors).toBeGreaterThanOrEqual(1);
+    jest.restoreAllMocks();
+  });
+
+  it('hitting the per-sweep run-listing cap sets QueuedJobScanTruncated to 1', async () => {
+    // 60 repos x 2 status listings = 120 run listings > the 100 cap.
+    setEnv({
+      SCOPE_JSON: JSON.stringify({
+        kind: 'repos',
+        repos: Array.from({ length: 60 }, (_, i) => `acme/repo-${i}`),
+      }),
+    });
+    listWorkflowRunsMock.mockResolvedValue([]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(1);
+    logSpy.mockRestore();
+  });
+
+  it('a clean sweep sets QueuedJobScanTruncated to 0', async () => {
+    setEnv();
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(0);
+    logSpy.mockRestore();
+  });
+
+  it('with metrics off, the scan makes no GitHub reads and emits nothing', async () => {
+    setEnv({ EMIT_METRICS: 'false' });
+    setRepos([{ owner: 'acme', repo: 'widgets' }]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(listInstallationReposMock).not.toHaveBeenCalled();
+    expect(listWorkflowRunsMock).not.toHaveBeenCalled();
+    expect(
+      logSpy.mock.calls
+        .map((c) => c[0] as string)
+        .filter((l) => typeof l === 'string' && l.includes('"_aws"')),
+    ).toHaveLength(0);
+    logSpy.mockRestore();
   });
 });

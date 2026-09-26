@@ -38,6 +38,32 @@ export interface GithubRunner {
   status: string;
 }
 
+/** One repository an App installation can reach (GET /installation/repositories). The janitor's org-scoped queued-job scan enumerates these. */
+export interface InstallationRepo {
+  owner: string;
+  repo: string;
+}
+
+/** A workflow run, trimmed to what the janitor's queued-job scan needs. */
+export interface WorkflowRun {
+  id: number;
+  status: string;
+  /** When GitHub created the run; the fallback age origin for a queued job whose own timestamps are absent. */
+  createdAt: string | undefined;
+}
+
+/** A workflow-run job, trimmed to what the janitor's queued-job scan needs. */
+export interface WorkflowRunJob {
+  id: number;
+  status: string;
+  /** The runner labels the job requested (`runs-on`). */
+  labels: string[];
+  /** When the job started running (null/absent while still queued). */
+  startedAt: string | undefined;
+  /** When the job was created/enqueued; the primary age origin for a queued job. */
+  createdAt: string | undefined;
+}
+
 /**
  * Thrown when GitHub responds with a rate-limit signal (403/429 with
  * `retry-after` or `x-ratelimit-remaining: 0`). Callers (SQS-driven
@@ -525,6 +551,111 @@ export async function listRunners(
     }
   }
   return runners;
+}
+
+/**
+ * List the repositories the App installation for `target` can reach,
+ * paginating `per_page=100` like {@link listRunners}. The janitor's org-scoped
+ * queued-job scan uses this to enumerate the repos to look at; a single
+ * installation covers every repo under the org, so one call authenticates the
+ * whole scan.
+ *
+ * App-kind auth only: `/installation/repositories` requires an installation
+ * access token. Under PAT auth GitHub answers 403 (a PAT is not an
+ * installation), which surfaces to the caller as a per-repo-enumeration error
+ * the janitor counts and isolates — org scope is the App-kind path in
+ * practice.
+ */
+export async function listInstallationRepos(
+  target: ScopeTarget,
+): Promise<InstallationRepo[]> {
+  const repos: InstallationRepo[] = [];
+  const pageSize = 100;
+  for (let page = 1; ; page += 1) {
+    const res = await authedFetch(
+      target,
+      `/installation/repositories?per_page=${pageSize}&page=${page}`,
+    );
+    await assertOk(res);
+    const body = (await res.json()) as {
+      repositories: Array<{ name: string; owner: { login: string } }>;
+    };
+    for (const r of body.repositories) {
+      repos.push({ owner: r.owner.login, repo: r.name });
+    }
+    if (body.repositories.length < pageSize) {
+      break;
+    }
+  }
+  return repos;
+}
+
+/**
+ * List a repo's workflow runs filtered to `status` (`queued` |
+ * `in_progress`), first page only (`per_page=100`).
+ *
+ * DELIBERATELY single-page, unlike {@link listRunners}: the janitor's
+ * queued-job scan is bounded by a per-sweep listing cap so its GitHub API
+ * cost stays predictable, and that accounting treats one call as one listing.
+ * Paginating here would turn one "run listing" into an unbounded number of
+ * API calls and break the cap; a repo with more than 100 queued/in-progress
+ * runs is vanishingly rare and the missing tail is caught by the truncation
+ * signal, not by silently spending the whole rate-limit bucket.
+ */
+export async function listWorkflowRuns(
+  target: ScopeTarget,
+  owner: string,
+  repo: string,
+  status: string,
+): Promise<WorkflowRun[]> {
+  const res = await authedFetch(
+    target,
+    `/repos/${owner}/${repo}/actions/runs?status=${status}&per_page=100`,
+  );
+  await assertOk(res);
+  const body = (await res.json()) as {
+    workflow_runs?: Array<{ id: number; status?: string; created_at?: string }>;
+  };
+  return (body.workflow_runs ?? []).map((r) => ({
+    id: r.id,
+    status: r.status ?? status,
+    createdAt: r.created_at ?? undefined,
+  }));
+}
+
+/**
+ * List the jobs of one workflow run (`per_page=100`, first page only — same
+ * bounded-cost reasoning as {@link listWorkflowRuns}). A queued job's `labels`
+ * decide which runner class (if any) owns it, and its `createdAt`/`startedAt`
+ * date how long it has waited.
+ */
+export async function listWorkflowRunJobs(
+  target: ScopeTarget,
+  owner: string,
+  repo: string,
+  runId: number,
+): Promise<WorkflowRunJob[]> {
+  const res = await authedFetch(
+    target,
+    `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`,
+  );
+  await assertOk(res);
+  const body = (await res.json()) as {
+    jobs?: Array<{
+      id: number;
+      status?: string;
+      labels?: string[];
+      started_at?: string | null;
+      created_at?: string | null;
+    }>;
+  };
+  return (body.jobs ?? []).map((j) => ({
+    id: j.id,
+    status: j.status ?? 'queued',
+    labels: j.labels ?? [],
+    startedAt: j.started_at ?? undefined,
+    createdAt: j.created_at ?? undefined,
+  }));
 }
 
 /** Fetch a single runner by id, or `undefined` if it no longer exists. */

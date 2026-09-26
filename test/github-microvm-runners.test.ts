@@ -2348,6 +2348,80 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
     });
   });
 
+  it('queuedJobAgeAlarm fires at >=1200s over one 5-minute period, missing data BREACHING, per class', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.queuedJobAgeAlarm(stack, 'microvm');
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'OldestQueuedJobSeconds',
+      Namespace: 'MicrovmRunners',
+      Statistic: 'Maximum',
+      Threshold: 1200,
+      EvaluationPeriods: 1,
+      Period: 300,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      // The distinguishing property: a silent janitor (no metric) must page.
+      TreatMissingData: 'breaching',
+      Dimensions: Match.arrayWith([{ Name: 'SizeClass', Value: 'microvm' }]),
+    });
+  });
+
+  it('queuedJobAgeAlarm uses a construct id unique per class label, so two classes give two alarms in one scope', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.queuedJobAgeAlarm(stack, 'small');
+    runners.metrics.queuedJobAgeAlarm(stack, 'large');
+    const alarms = Template.fromStack(stack).findResources(
+      'AWS::CloudWatch::Alarm',
+    );
+    expect(Object.keys(alarms).length).toBe(2);
+  });
+
+  it('queuedJobAgeAlarm honours option overrides', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    runners.metrics.queuedJobAgeAlarm(stack, 'microvm', {
+      threshold: 600,
+      evaluationPeriods: 2,
+      period: Duration.minutes(1),
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Threshold: 600,
+      EvaluationPeriods: 2,
+      Period: 60,
+    });
+  });
+
+  it('queuedJobScanTruncated / oldestQueuedJobSeconds / queuedJobs accessors return metrics in the MicrovmRunners namespace', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      emitMetrics: true,
+    });
+    expect(runners.metrics.queuedJobScanTruncated().namespace).toBe(
+      'MicrovmRunners',
+    );
+    expect(runners.metrics.queuedJobScanTruncated().metricName).toBe(
+      'QueuedJobScanTruncated',
+    );
+    const oldest = runners.metrics.oldestQueuedJobSeconds('microvm');
+    expect(oldest.metricName).toBe('OldestQueuedJobSeconds');
+    expect(oldest.dimensions).toEqual(
+      expect.objectContaining({ SizeClass: 'microvm' }),
+    );
+    expect(oldest.dimensions).toHaveProperty('RunnerSetId');
+    expect(runners.metrics.queuedJobs('microvm').metricName).toBe('QueuedJobs');
+  });
+
   it('capacityRejectedAlarm uses a construct id unique per class label, so two classes give two alarms in one scope', () => {
     const stack = newStack();
     const runners = mkRunners(stack, 'Runners', {
@@ -2491,6 +2565,17 @@ describe('GithubMicrovmRunners: emitMetrics opt-in gate', () => {
     expect(() =>
       runners.metrics.capacityRejectedAlarm(stack, 'microvm'),
     ).toThrow(/`CapacityRejected`/);
+  });
+
+  it('queuedJobAgeAlarm throws when metrics are off, naming the prop and the metric', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', minimalProps(stack));
+    expect(() => runners.metrics.queuedJobAgeAlarm(stack, 'microvm')).toThrow(
+      /queuedJobAgeAlarm\(\) requires emitMetrics: true/,
+    );
+    expect(() => runners.metrics.queuedJobAgeAlarm(stack, 'microvm')).toThrow(
+      /`OldestQueuedJobSeconds`/,
+    );
   });
 
   it('both EMF-backed alarms succeed with emitMetrics: true', () => {

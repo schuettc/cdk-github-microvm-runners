@@ -2532,11 +2532,15 @@ Whether the runner set reports the metrics this class names, which is `GithubMic
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.errors">errors</a></code> | Janitor sweep count: failures on individual VMs, rows, or image versions during a sweep. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.imageVersionsPruned">imageVersionsPruned</a></code> | Janitor sweep count: inactive MicroVM image versions pruned past `keepImageVersions`. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.lifetimeKills">lifetimeKills</a></code> | Janitor sweep count: VMs terminated for having run longer than `maxJobDuration` plus the platform's own grace. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.oldestQueuedJobSeconds">oldestQueuedJobSeconds</a></code> | Janitor per-class gauge (seconds): how long the oldest queued job this class owns has waited, measured read-only each sweep, or 0 when the class has nothing queued. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.orphansReaped">orphansReaped</a></code> | Janitor sweep count: running VMs that belong to this runner set but have no row in the runner table, reaped once a second sweep has seen the same VM unaccounted for. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.poolCurrent">poolCurrent</a></code> | Warm VMs suspended and available for this class as of the last warm-pool sweep. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.poolLaunched">poolLaunched</a></code> | Warm VMs the last warm-pool sweep launched to reach `warmPoolSize`. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.poolLaunchFailed">poolLaunchFailed</a></code> | Warm-VM launches a warm-pool sweep attempted and failed. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.poolTarget">poolTarget</a></code> | This class's `warmPoolSize`, as the last warm-pool sweep read it. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobAgeAlarm">queuedJobAgeAlarm</a></code> | Alarm when a runner class has a job that has waited queued far longer than a runner should take to appear — the signal that NO launch happened at all, which the reap-based alarms structurally cannot catch. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobs">queuedJobs</a></code> | Janitor per-class gauge: queued jobs this class owned as of the last sweep (see {@link oldestQueuedJobSeconds} for ownership). |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobScanTruncated">queuedJobScanTruncated</a></code> | Janitor per-sweep flag: 1 when a sweep hit its GitHub-listing cap and did not scan every queued job, so `oldestQueuedJobSeconds`/`queuedJobs` may under-report that sweep. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckClaimsRelaunched">stuckClaimsRelaunched</a></code> | Janitor sweep count: launches that were claimed but never served, re-launched from the orphaned claim. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckLaunchesRecovered">stuckLaunchesRecovered</a></code> | Janitor sweep count: dead-lettered launches re-driven onto the job queue, which is 0 unless `recoverStuckLaunches` is on. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckLaunchesRecoveredAlarm">stuckLaunchesRecoveredAlarm</a></code> | Alarm on stuck-launch recoveries, the dead-lettered launches the janitor re-drove, which only happens with `recoverStuckLaunches` on. |
@@ -2739,6 +2743,28 @@ public lifetimeKills(): Metric
 
 Janitor sweep count: VMs terminated for having run longer than `maxJobDuration` plus the platform's own grace.
 
+##### `oldestQueuedJobSeconds` <a name="oldestQueuedJobSeconds" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.oldestQueuedJobSeconds"></a>
+
+```typescript
+public oldestQueuedJobSeconds(runnerClassLabel: string): Metric
+```
+
+Janitor per-class gauge (seconds): how long the oldest queued job this class owns has waited, measured read-only each sweep, or 0 when the class has nothing queued.
+
+A job is owned by a class when every runner label it
+requests beyond `self-hosted` is that class's label — GitHub's own
+matching — so another runner set's jobs are excluded. Emitted every sweep
+for every class, which is what lets {@link queuedJobAgeAlarm} treat missing
+data as breaching.
+
+Reported as an average across a period; the alarm reads it as a maximum.
+
+###### `runnerClassLabel`<sup>Required</sup> <a name="runnerClassLabel" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.oldestQueuedJobSeconds.parameter.runnerClassLabel"></a>
+
+- *Type:* string
+
+---
+
 ##### `orphansReaped` <a name="orphansReaped" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.orphansReaped"></a>
 
 ```typescript
@@ -2804,6 +2830,73 @@ This class's `warmPoolSize`, as the last warm-pool sweep read it.
 - *Type:* string
 
 ---
+
+##### `queuedJobAgeAlarm` <a name="queuedJobAgeAlarm" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobAgeAlarm"></a>
+
+```typescript
+public queuedJobAgeAlarm(scope: Construct, runnerClassLabel: string, options?: RunnerAlarmOptions): Alarm
+```
+
+Alarm when a runner class has a job that has waited queued far longer than a runner should take to appear — the signal that NO launch happened at all, which the reap-based alarms structurally cannot catch.
+
+A misrouted or
+dropped webhook, a GitHub App failure, a launch bug, or a MicroVM quota
+wall all leave the same fingerprint: a job sits `queued` and no VM is ever
+created for it, so there is no stuck runner to reap and no error to count.
+
+The janitor measures the oldest queued job per class every sweep, so this
+fires when a class's oldest queued job crosses the threshold (20 minutes
+by default) over a single 5-minute period, read as a maximum. It also
+**treats missing data as breaching**: the metric is emitted every sweep,
+so its absence means the janitor itself has gone silent — itself a failure
+worth paging on — rather than "nothing queued".
+
+`oldestQueuedJobSeconds` is dimensioned per runner class, so this builds
+one alarm per `runnerClassLabel` under an id unique to that label — call it
+once per class you want watched, in the same scope, without collision.
+
+Requires `GithubMicrovmRunnersProps.emitMetrics`, and throws at synth
+without it.
+
+###### `scope`<sup>Required</sup> <a name="scope" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobAgeAlarm.parameter.scope"></a>
+
+- *Type:* constructs.Construct
+
+---
+
+###### `runnerClassLabel`<sup>Required</sup> <a name="runnerClassLabel" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobAgeAlarm.parameter.runnerClassLabel"></a>
+
+- *Type:* string
+
+---
+
+###### `options`<sup>Optional</sup> <a name="options" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobAgeAlarm.parameter.options"></a>
+
+- *Type:* <a href="#cdk-github-microvm-runners.RunnerAlarmOptions">RunnerAlarmOptions</a>
+
+---
+
+##### `queuedJobs` <a name="queuedJobs" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobs"></a>
+
+```typescript
+public queuedJobs(runnerClassLabel: string): Metric
+```
+
+Janitor per-class gauge: queued jobs this class owned as of the last sweep (see {@link oldestQueuedJobSeconds} for ownership).
+
+###### `runnerClassLabel`<sup>Required</sup> <a name="runnerClassLabel" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobs.parameter.runnerClassLabel"></a>
+
+- *Type:* string
+
+---
+
+##### `queuedJobScanTruncated` <a name="queuedJobScanTruncated" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobScanTruncated"></a>
+
+```typescript
+public queuedJobScanTruncated(): Metric
+```
+
+Janitor per-sweep flag: 1 when a sweep hit its GitHub-listing cap and did not scan every queued job, so `oldestQueuedJobSeconds`/`queuedJobs` may under-report that sweep.
 
 ##### `stuckClaimsRelaunched` <a name="stuckClaimsRelaunched" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckClaimsRelaunched"></a>
 
