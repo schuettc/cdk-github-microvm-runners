@@ -38,7 +38,22 @@ release will carry.
   none by default; a job that needs AWS obtains its own credentials through
   GitHub OIDC.
 - Warm pools, idle auto-suspend and resume, and outage recovery through
-  `recoverStuckLaunches`.
+  `recoverStuckLaunches` (on by default). It re-drives dead-lettered launches,
+  re-launches claims whose VM is gone while the job is still queued, and —
+  new — re-launches a still-queued job the instant its runner is reaped as
+  `unregistered` (a VM that launched but never registered with GitHub). Both
+  recovery paths (the committed-claim relaunch and the `unregistered` reap)
+  share ONE per-job attempt counter, threaded through the launch message onto
+  the fresh claim, so a job that repeatedly fails to register relaunches at most
+  a fixed number of times and is then RELEASED (its claim is deleted so nothing
+  resurrects it) and raised, instead of looping forever. The
+  `unregisteredRelaunched` and `unregisteredRelaunchExhausted` janitor metrics
+  report both outcomes; at exhaustion the job stays `queued` (the queued-age
+  alarm and the exhausted metric fire) until the operator fixes the cause (a
+  bad image, broken egress, a boot that never completes) and re-runs it. An
+  `unregistered` reap now also logs the VM's last-known launch/boot status
+  (state, boot time, image) so a VM that produced no console output can be told
+  apart from one that booted and failed to register.
 - A customer-managed KMS key (`encryptionKey`), a permissions boundary applied
   to every role the construct creates, and control over the removal policy,
   DynamoDB point-in-time recovery, log and dead-letter retention, the

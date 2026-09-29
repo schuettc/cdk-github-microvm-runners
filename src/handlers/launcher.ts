@@ -171,6 +171,14 @@ interface LaunchMessage {
   jobId: number;
   runId: number;
   labels: string[];
+  /**
+   * Set only by the janitor's `unregistered`-reap relaunch (issue #48): how
+   * many times this job has already been re-launched because a prior launch's
+   * VM never registered. Stamped onto this attempt's claim so the counter
+   * survives across relaunch cycles and the janitor can bound the loop. Absent
+   * on a first launch from the webhook (treated as 0).
+   */
+  relaunchAttempts?: number;
 }
 
 interface TerminateMessage {
@@ -354,6 +362,7 @@ function claimItem(params: {
   nowIso: string;
   expiresAt: number;
   attemptToken: string;
+  relaunchAttempts?: number;
 }): Record<string, unknown> {
   return {
     runnerName: params.claimKey,
@@ -363,6 +372,12 @@ function claimItem(params: {
     launchedAt: params.nowIso,
     expiresAt: params.expiresAt,
     attemptToken: params.attemptToken,
+    // Omit-when-unset (see the module's DynamoDB conventions): only a janitor
+    // relaunch carries a non-zero count, so a first/webhook launch's claim is
+    // unchanged in shape.
+    ...(params.relaunchAttempts
+      ? { relaunchAttempts: params.relaunchAttempts }
+      : {}),
   };
 }
 
@@ -392,6 +407,7 @@ async function acquireLaunchClaim(params: {
   nowMs: number;
   nowIso: string;
   expiresAt: number;
+  relaunchAttempts?: number;
 }): Promise<
   | { status: 'acquired'; attemptToken: string }
   | { status: 'duplicate' }
@@ -1172,6 +1188,11 @@ async function handleLaunch(message: LaunchMessage): Promise<void> {
     nowMs,
     nowIso,
     expiresAt: claimExpiresAt,
+    // Carried from a janitor `unregistered`-reap relaunch (issue #48), so the
+    // retry counter survives onto this attempt's claim; absent (0) otherwise.
+    ...(message.relaunchAttempts
+      ? { relaunchAttempts: message.relaunchAttempts }
+      : {}),
   });
   if (claimResult.status === 'duplicate') {
     return;
