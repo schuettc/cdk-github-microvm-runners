@@ -870,11 +870,34 @@ function isCommittedClaim(row: RunnerRow): boolean {
 }
 
 /**
+ * How many times the janitor re-launches a job whose runner keeps getting
+ * reaped/torn down before it ever registers, before it gives up and RAISES
+ * instead of looping. A VM that never registers is usually transient (a lost
+ * egress route, a slow boot that outran the two-strike window), so a couple of
+ * retries clears it; a job that fails to register this many times is a real
+ * fault (a bad image, a broken network config) that quiet re-launching would
+ * mask forever — the operator's standard is no silent failure, so at the bound
+ * the claim is RELEASED (deleted, so nothing resurrects it) and the trip is
+ * raised via a metric ({@link Metrics.unregisteredRelaunchExhausted}) plus an
+ * error log; the job then stays `queued` loudly (queued-age alarm + exhausted
+ * metric) until the operator fixes the cause and re-runs it. This ONE bound is
+ * shared by BOTH recovery paths — the `unregistered` reap
+ * ({@link relaunchUnregisteredJob}) and the committed-claim reconciliation
+ * ({@link reconcileCommittedClaim}) — via the `relaunchAttempts` counter that
+ * threads through the SQS launch message onto the fresh claim, so the two paths
+ * increment a single counter rather than each restarting from zero.
+ */
+const MAX_UNREGISTERED_RELAUNCH_ATTEMPTS = 3;
+
+/**
  * Reconcile one COMMITTED claim row (`recoverStuckLaunches`): if its VM is gone
  * or TERMINATED but the GitHub job is still `queued`, the launch committed yet
  * never served the job (the runner was reaped before assignment) — delete the
- * stale claim and re-drive a fresh launch. A RUNNING/SUSPENDED VM, or a job no
- * longer `queued`, is left alone.
+ * stale claim and re-drive a fresh launch, carrying the `relaunchAttempts`
+ * counter forward (+1) so this path shares the ONE relaunch bound with the
+ * `unregistered` reap. At the bound the claim is released and the exhaustion is
+ * raised instead of relaunching (see {@link MAX_UNREGISTERED_RELAUNCH_ATTEMPTS}).
+ * A RUNNING/SUSPENDED VM, or a job no longer `queued`, is left alone.
  *
  * Ordering: delete-BEFORE-send is required here (unlike `recoverOneStuckLaunch`,
  * which does the reverse for DLQ'd launches): the committed claim is present,
@@ -910,6 +933,31 @@ async function reconcileCommittedClaim(
   if (job?.status !== 'queued') {
     return; // job done/cancelled/gone — leave for hygiene delete on expiry
   }
+  // ONE relaunch bound, shared with the `unregistered` reap: read the counter
+  // this path last stamped (via the launch message) and, at the cap, RELEASE
+  // the claim and RAISE instead of relaunching — otherwise a job that can never
+  // register (bad image, broken egress) would loop forever through this path
+  // (each relaunch re-stamps a fresh claim). Same metric + structured error as
+  // the sibling path so the two are indistinguishable to an operator.
+  const attempts = claimRow.relaunchAttempts ?? 0;
+  if (attempts >= MAX_UNREGISTERED_RELAUNCH_ATTEMPTS) {
+    await deleteRow(ctx.tableName, claimRow.runnerName);
+    ctx.metrics.unregisteredRelaunchExhausted += 1;
+    console.error(
+      JSON.stringify({
+        msg: 'janitor: relaunch attempts exhausted',
+        scope: 'reconcile',
+        rule: 'committed-claim',
+        repo: claimRow.repo,
+        jobId: claimRow.jobId,
+        attempt: attempts,
+        reason:
+          'runner never registered — job stays queued for operator re-run',
+      }),
+    );
+    return;
+  }
+  const nextAttempt = attempts + 1;
   await deleteRow(ctx.tableName, claimRow.runnerName);
   try {
     await sqsClient().send(
@@ -921,6 +969,7 @@ async function reconcileCommittedClaim(
           jobId: claimRow.jobId,
           runId: job.runId,
           labels: job.labels,
+          relaunchAttempts: nextAttempt,
         }),
       }),
     );
@@ -955,21 +1004,10 @@ async function reconcileCommittedClaim(
       action: 'relaunched-committed',
       repo: claimRow.repo,
       jobId: claimRow.jobId,
+      attempt: nextAttempt,
     }),
   );
 }
-
-/**
- * How many times the janitor re-launches a job whose runner keeps getting
- * reaped as `unregistered` before it gives up and RAISES instead of looping.
- * A VM that never registers is usually transient (a lost egress route, a slow
- * boot that outran the two-strike window), so a couple of retries clears it;
- * a job that fails to register this many times is a real fault (a bad image, a
- * broken network config) that quiet re-launching would mask forever — the
- * operator's standard is no silent failure, so the bound trips a metric
- * ({@link Metrics.unregisteredRelaunchExhausted}) and an error log instead.
- */
-const MAX_UNREGISTERED_RELAUNCH_ATTEMPTS = 3;
 
 /**
  * Issue #48 gap 1 — bounded, in-invocation relaunch of a job whose runner
@@ -1114,7 +1152,8 @@ async function relaunchUnregisteredJob(
     ctx.metrics.unregisteredRelaunched += 1;
     console.log(
       JSON.stringify({
-        msg: 'janitor: relaunched',
+        scope: 'reconcile',
+        action: 'relaunched-unregistered',
         rule: 'unregistered',
         repo: row.repo,
         jobId: row.jobId,

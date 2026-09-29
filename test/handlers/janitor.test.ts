@@ -131,6 +131,7 @@ interface RowFixture {
   suspectSince?: string;
   orphanSince?: string;
   runnerId?: number;
+  relaunchAttempts?: number;
 }
 
 function normalRow(overrides: Partial<RowFixture> = {}): RowFixture {
@@ -1897,6 +1898,9 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
       jobId: 1001,
       runId: 42,
       labels: ['self-hosted', 'microvm'],
+      // The ONE relaunch bound is shared with the unregistered path: a fresh
+      // committed-claim relaunch carries relaunchAttempts=1 forward.
+      relaunchAttempts: 1,
     });
     const emfLine = logSpy.mock.calls
       .map((c) => c[0] as string)
@@ -1906,6 +1910,78 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
     };
     expect(parsed.stuckClaimsRelaunched).toBe(1);
     logSpy.mockRestore();
+  });
+
+  it('honors the ONE shared relaunch cap: a committed claim already at MAX relaunchAttempts is RELEASED (deleted) and raised, NOT relaunched', async () => {
+    enableRecovery();
+    // The reviewer loop, isolated to this path: a claim that already reached
+    // the cap via prior relaunches, whose VM is again gone and job still
+    // queued. Without the cap here it would relaunch forever.
+    setTableRows([{ ...committedClaim(), relaunchAttempts: 3 }]);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    const errSpy = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    // No relaunch — the loop bound trips.
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+    // The claim is RELEASED (deleted) so nothing resurrects it next sweep.
+    expect(
+      ddbMock
+        .commandCalls(DeleteItemCommand)
+        .some(
+          (c) => c.args[0].input.Key?.runnerName?.S === 'job#acme/widgets#1001',
+        ),
+    ).toBe(true);
+    // Raised loudly: shared exhausted metric + structured error line.
+    const raised = errSpy.mock.calls
+      .map((c) => c[0] as string)
+      .some(
+        (l) =>
+          typeof l === 'string' &&
+          l.includes('janitor: relaunch attempts exhausted'),
+      );
+    expect(raised).toBe(true);
+    const emfLine = logSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
+    const parsed = JSON.parse(emfLine as string) as {
+      stuckClaimsRelaunched: number;
+      unregisteredRelaunchExhausted: number;
+    };
+    expect(parsed.stuckClaimsRelaunched).toBe(0);
+    expect(parsed.unregisteredRelaunchExhausted).toBe(1);
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it('threads the counter forward: a committed claim at relaunchAttempts=1 relaunches carrying relaunchAttempts=2', async () => {
+    enableRecovery();
+    setTableRows([{ ...committedClaim(), relaunchAttempts: 1 }]);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await handler();
+
+    const sends = sqsMock.commandCalls(SendMessageCommand);
+    expect(sends).toHaveLength(1);
+    expect(
+      JSON.parse(sends[0].args[0].input.MessageBody as string).relaunchAttempts,
+    ).toBe(2);
+    jest.restoreAllMocks();
   });
 
   it('M1: if SendMessage fails AFTER the claim is deleted, the claim is RESTORED (no permanent strand) and the sweep survives', async () => {
@@ -2387,6 +2463,69 @@ describe('recoverStuckLaunches: unregistered-reap relaunch (issue #48)', () => {
     expect(typeof reapLine?.vmAgeSeconds).toBe('number');
     expect(reapLine?.vmStartedAt).toBeDefined();
     logSpy.mockRestore();
+  });
+
+  it('MULTI-SWEEP (reviewer regression): a job that never registers relaunches AT MOST the cap across BOTH paths, then is released — no infinite loop', async () => {
+    enableRecovery();
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+    listRunnersMock.mockResolvedValue([]); // always absent -> unregistered reap
+    getRunnerMock.mockResolvedValue(undefined);
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const CAP = 3;
+    // Drive successive sweeps, threading relaunchAttempts forward exactly as
+    // the launcher would when it re-stamps the fresh claim from the SQS
+    // message. Each sweep the runner is reaped `unregistered` and the job is
+    // still queued — the pre-fix loop would relaunch forever.
+    let attempts = 0;
+    for (let sweep = 0; sweep < CAP + 5; sweep++) {
+      const vmId = `mvm-loop-${sweep}`;
+      vmRunningAtSweepStart(vmId); // reaped VM is RUNNING at sweep start
+      setTableRows([
+        reapableMappingRow({ microvmId: vmId }),
+        claimForMapping({ microvmId: vmId, relaunchAttempts: attempts }),
+      ]);
+      const before = sqsMock.commandCalls(SendMessageCommand).length;
+      await handler();
+      const sends = sqsMock.commandCalls(SendMessageCommand);
+      if (sends.length === before) break; // bound tripped -> no relaunch
+      const body = JSON.parse(
+        sends[sends.length - 1].args[0].input.MessageBody as string,
+      );
+      expect(body.relaunchAttempts).toBe(attempts + 1);
+      attempts = body.relaunchAttempts;
+    }
+
+    // Exactly CAP relaunches total across the whole run, then it STOPPED.
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(CAP);
+    expect(attempts).toBe(CAP);
+
+    // Reproduce the EXACT reviewer loop's tail: even if a committed claim at
+    // the cap lingers with its VM gone, `reconcileCommittedClaim` on the NEXT
+    // sweep must NOT resurrect it — the ONE bound is honored there too.
+    const before = sqsMock.commandCalls(SendMessageCommand).length;
+    setRunnerSetVms([]); // committed claim's VM reads dead
+    setTableRows([
+      claimForMapping({ microvmId: 'mvm-dead', relaunchAttempts: CAP }),
+    ]);
+    await handler();
+    expect(sqsMock.commandCalls(SendMessageCommand).length).toBe(before);
+
+    // And it raised loudly (exhausted error) rather than failing silently.
+    const errRaised = (console.error as jest.Mock).mock.calls
+      .map((c) => c[0])
+      .some(
+        (l: unknown) =>
+          typeof l === 'string' &&
+          l.includes('janitor: relaunch attempts exhausted'),
+      );
+    expect(errRaised).toBe(true);
+    jest.restoreAllMocks();
   });
 });
 
