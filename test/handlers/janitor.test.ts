@@ -2062,6 +2062,334 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
   });
 });
 
+describe('recoverStuckLaunches: unregistered-reap relaunch (issue #48)', () => {
+  function enableRecovery(): void {
+    process.env.RECOVER_STUCK_LAUNCHES = 'true';
+    process.env.JOB_QUEUE_URL = JOB_QUEUE_URL;
+    process.env.DEAD_LETTER_QUEUE_URL = DLQ_URL;
+  }
+
+  // A mapping row that will reap under rule `unregistered` THIS sweep: absent
+  // from GitHub, with a strike already older than one interval.
+  function reapableMappingRow(overrides: Partial<RowFixture> = {}): RowFixture {
+    return normalRow({
+      suspectSince: isoMinusSeconds(INTERVAL_SECONDS + 1),
+      runnerId: 555,
+      ...overrides,
+    });
+  }
+
+  // The committed claim for that mapping row's job, pointing at the SAME VM.
+  function claimForMapping(overrides: Partial<RowFixture> = {}): RowFixture {
+    return {
+      runnerName: 'job#acme/widgets#1001',
+      microvmId: 'mvm-1',
+      repo: 'acme/widgets',
+      jobId: 1001,
+      expiresAt: Math.floor(NOW_MS / 1000) + 999_999,
+      ...overrides,
+    };
+  }
+
+  // The reaped VM is still RUNNING at sweep start (it launched but never
+  // registered), so the committed-claim pass earlier in the sweep sees it
+  // alive and skips — the reap below is what makes it gone. Mirror that in the
+  // GetMicrovm mock the committed-claim pass reads.
+  function vmRunningAtSweepStart(microvmId = 'mvm-1'): void {
+    setRunnerSetVms([{ microvmId, ageSeconds: 700 }]);
+    mvmMock.on(GetMicrovmCommand, { microvmIdentifier: microvmId }).resolves({
+      microvmId,
+      state: 'RUNNING' as never,
+      imageArn: IMAGE_ARN_DEFAULT,
+      imageVersion: '1',
+      startedAt: new Date(NOW_MS - 700_000),
+    });
+  }
+
+  function emitted(
+    logSpy: ReturnType<typeof jest.spyOn>,
+  ): Record<string, number> {
+    const line = logSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find(
+        (l) =>
+          typeof l === 'string' &&
+          l.includes('"_aws"') &&
+          l.includes('"errors"'),
+      );
+    return JSON.parse(line as string) as Record<string, number>;
+  }
+
+  it('relaunches the still-queued job the moment its runner is reaped as unregistered, bounded by an attempt counter', async () => {
+    enableRecovery();
+    vmRunningAtSweepStart();
+    setTableRows([reapableMappingRow(), claimForMapping()]);
+    listRunnersMock.mockResolvedValue([]); // absent -> unregistered reap
+    getRunnerMock.mockResolvedValue(undefined);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    // The VM is reaped …
+    const term = mvmMock.commandCalls(TerminateMicrovmCommand);
+    expect(
+      term.some((c) => c.args[0].input.microvmIdentifier === 'mvm-1'),
+    ).toBe(true);
+    // … the mapping row AND the committed claim are deleted …
+    const deleted = ddbMock
+      .commandCalls(DeleteItemCommand)
+      .map((c) => c.args[0].input.Key?.runnerName?.S);
+    expect(deleted).toContain('microvm-runner-x-abc12345');
+    expect(deleted).toContain('job#acme/widgets#1001');
+    // … and a fresh launch is enqueued carrying relaunchAttempts=1.
+    const sends = sqsMock.commandCalls(SendMessageCommand);
+    expect(sends).toHaveLength(1);
+    expect(sends[0].args[0].input.QueueUrl).toBe(JOB_QUEUE_URL);
+    expect(JSON.parse(sends[0].args[0].input.MessageBody as string)).toEqual({
+      kind: 'launch',
+      repo: 'acme/widgets',
+      jobId: 1001,
+      runId: 42,
+      labels: ['self-hosted', 'microvm'],
+      relaunchAttempts: 1,
+    });
+    const m = emitted(logSpy);
+    expect(m.unregisteredRelaunched).toBe(1);
+    expect(m.stuckClaimsRelaunched).toBe(0);
+    expect(m.unregisteredRelaunchExhausted).toBe(0);
+    logSpy.mockRestore();
+  });
+
+  it.each(['in_progress', 'completed', 'cancelled'])(
+    'does NOT relaunch when the job is %s (no send, claim kept)',
+    async (status) => {
+      enableRecovery();
+      vmRunningAtSweepStart();
+      setTableRows([reapableMappingRow(), claimForMapping()]);
+      listRunnersMock.mockResolvedValue([]);
+      getRunnerMock.mockResolvedValue(undefined);
+      getWorkflowJobMock.mockResolvedValue({
+        status,
+        labels: ['self-hosted', 'microvm'],
+        runId: 42,
+      });
+
+      await handler();
+
+      // Still reaped, but nothing relaunched and the claim is left for hygiene.
+      expect(
+        mvmMock
+          .commandCalls(TerminateMicrovmCommand)
+          .some((c) => c.args[0].input.microvmIdentifier === 'mvm-1'),
+      ).toBe(true);
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+      const deleted = ddbMock
+        .commandCalls(DeleteItemCommand)
+        .map((c) => c.args[0].input.Key?.runnerName?.S);
+      expect(deleted).not.toContain('job#acme/widgets#1001');
+    },
+  );
+
+  it('attempt cap: a claim already relaunched MAX times is NOT relaunched again — no send, error log + exhausted metric', async () => {
+    enableRecovery();
+    vmRunningAtSweepStart();
+    // relaunchAttempts already at the cap (3).
+    setTableRows([
+      reapableMappingRow(),
+      claimForMapping({ relaunchAttempts: 3 }),
+    ]);
+    listRunnersMock.mockResolvedValue([]);
+    getRunnerMock.mockResolvedValue(undefined);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    const errSpy = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    // Reaped, but the loop bound trips: no relaunch, and the cap is checked
+    // BEFORE probing GitHub (the claim already tells us the count).
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+    expect(getWorkflowJobMock).not.toHaveBeenCalled();
+    const raised = errSpy.mock.calls
+      .map((c) => c[0] as string)
+      .some(
+        (l) =>
+          typeof l === 'string' &&
+          l.includes('janitor: relaunch attempts exhausted'),
+      );
+    expect(raised).toBe(true);
+    const m = emitted(logSpy);
+    expect(m.unregisteredRelaunchExhausted).toBe(1);
+    expect(m.unregisteredRelaunched).toBe(0);
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it('no double launch: a claim committed to a DIFFERENT VM (a newer launch, e.g. a webhook re-delivery) is left alone', async () => {
+    enableRecovery();
+    vmRunningAtSweepStart('mvm-1'); // the reaped VM
+    // The claim now points at mvm-2 — a newer launch already owns this job.
+    mvmMock.on(GetMicrovmCommand, { microvmIdentifier: 'mvm-2' }).resolves({
+      microvmId: 'mvm-2',
+      state: 'RUNNING' as never,
+      imageArn: IMAGE_ARN_DEFAULT,
+      imageVersion: '1',
+      startedAt: new Date(NOW_MS - 30_000),
+    });
+    setTableRows([
+      reapableMappingRow(),
+      claimForMapping({ microvmId: 'mvm-2' }),
+    ]);
+    listRunnersMock.mockResolvedValue([]);
+    getRunnerMock.mockResolvedValue(undefined);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+
+    await handler();
+
+    // mvm-1 reaped, but NO relaunch (the job already has mvm-2) and the newer
+    // claim is untouched.
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+    const deleted = ddbMock
+      .commandCalls(DeleteItemCommand)
+      .map((c) => c.args[0].input.Key?.runnerName?.S);
+    expect(deleted).not.toContain('job#acme/widgets#1001');
+  });
+
+  it('no double launch: no committed claim for the job (already served/gone) -> no relaunch', async () => {
+    enableRecovery();
+    vmRunningAtSweepStart();
+    setTableRows([reapableMappingRow()]); // no claim row at all
+    listRunnersMock.mockResolvedValue([]);
+    getRunnerMock.mockResolvedValue(undefined);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+
+    await handler();
+
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+    expect(getWorkflowJobMock).not.toHaveBeenCalled();
+  });
+
+  it('feature off: the unregistered reap terminates and deletes only — no GitHub probe, no relaunch (unchanged behaviour)', async () => {
+    // No enableRecovery() -> RECOVER_STUCK_LAUNCHES unset.
+    vmRunningAtSweepStart();
+    setTableRows([reapableMappingRow(), claimForMapping()]);
+    listRunnersMock.mockResolvedValue([]);
+    getRunnerMock.mockResolvedValue(undefined);
+
+    await handler();
+
+    expect(
+      mvmMock
+        .commandCalls(TerminateMicrovmCommand)
+        .some((c) => c.args[0].input.microvmIdentifier === 'mvm-1'),
+    ).toBe(true);
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+    expect(getWorkflowJobMock).not.toHaveBeenCalled();
+  });
+
+  it('send failure AFTER the claim is deleted RESTORES the claim (no permanent strand) and isolates the error', async () => {
+    enableRecovery();
+    vmRunningAtSweepStart();
+    setTableRows([reapableMappingRow(), claimForMapping()]);
+    listRunnersMock.mockResolvedValue([]);
+    getRunnerMock.mockResolvedValue(undefined);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+    sqsMock
+      .on(SendMessageCommand)
+      .rejects(Object.assign(new Error('sqs down'), { name: 'Error' }));
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(handler()).resolves.not.toThrow();
+
+    // claim deleted (delete-before-send) then RESTORED via PutItem.
+    expect(
+      ddbMock
+        .commandCalls(DeleteItemCommand)
+        .some(
+          (c) => c.args[0].input.Key?.runnerName?.S === 'job#acme/widgets#1001',
+        ),
+    ).toBe(true);
+    expect(
+      ddbMock
+        .commandCalls(PutItemCommand)
+        .some(
+          (c) =>
+            c.args[0].input.Item?.runnerName?.S === 'job#acme/widgets#1001',
+        ),
+    ).toBe(true);
+    const m = emitted(logSpy);
+    expect(m.errors).toBeGreaterThanOrEqual(1);
+    expect(m.unregisteredRelaunched).toBe(0);
+    logSpy.mockRestore();
+    jest.restoreAllMocks();
+  });
+
+  it('the unregistered reap log carries the VM last-known launch/boot status (issue #48 gap 2)', async () => {
+    enableRecovery();
+    vmRunningAtSweepStart();
+    setTableRows([reapableMappingRow(), claimForMapping()]);
+    listRunnersMock.mockResolvedValue([]);
+    getRunnerMock.mockResolvedValue(undefined);
+    getWorkflowJobMock.mockResolvedValue({
+      status: 'queued',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    });
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const reapLine = logSpy.mock.calls
+      .map((c) => c[0] as string)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, unknown>;
+        } catch {
+          return undefined;
+        }
+      })
+      .find((o) => o?.msg === 'janitor: reaped' && o?.rule === 'unregistered');
+    expect(reapLine).toBeDefined();
+    expect(reapLine?.vmState).toBe('RUNNING');
+    expect(reapLine?.vmImageArn).toBe(IMAGE_ARN_DEFAULT);
+    expect(typeof reapLine?.vmAgeSeconds).toBe('number');
+    expect(reapLine?.vmStartedAt).toBeDefined();
+    logSpy.mockRestore();
+  });
+});
+
 describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
   function emfLines(
     logSpy: ReturnType<typeof jest.spyOn>,

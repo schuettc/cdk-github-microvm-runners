@@ -41,18 +41,20 @@ two shapes.
 **Per runner set**, dimensioned by `RunnerSetId`, the janitor emits one envelope
 per sweep. Two runner sets in the same account and region report separately.
 
-| Accessor                   | Counts                                              |
-| -------------------------- | --------------------------------------------------- |
-| `orphansReaped()`          | running VMs with no mapping row, terminated         |
-| `stuckRunnersReaped()`     | registered runners GitHub had lost track of         |
-| `suspectsCleared()`        | suspicions withdrawn when a fresh read contradicted |
-| `lifetimeKills()`          | VMs terminated for exceeding their lifetime         |
-| `imageVersionsPruned()`    | superseded image versions removed                   |
-| `tableRowsCleaned()`       | stale runner-table rows deleted                     |
-| `stuckLaunchesRecovered()` | dead-lettered launches re-driven onto the queue     |
-| `stuckClaimsRelaunched()`  | launch claims taken over after an attempt died      |
-| `errors()`                 | failures the sweep isolated and continued past      |
-| `queuedJobScanTruncated()` | 1 when a sweep hit its GitHub-listing cap mid-scan  |
+| Accessor                          | Counts                                                       |
+| --------------------------------- | ------------------------------------------------------------ |
+| `orphansReaped()`                 | running VMs with no mapping row, terminated                  |
+| `stuckRunnersReaped()`            | registered runners GitHub had lost track of                  |
+| `suspectsCleared()`               | suspicions withdrawn when a fresh read contradicted          |
+| `lifetimeKills()`                 | VMs terminated for exceeding their lifetime                  |
+| `imageVersionsPruned()`           | superseded image versions removed                            |
+| `tableRowsCleaned()`              | stale runner-table rows deleted                              |
+| `stuckLaunchesRecovered()`        | dead-lettered launches re-driven onto the queue              |
+| `stuckClaimsRelaunched()`         | launch claims taken over after an attempt died               |
+| `unregisteredRelaunched()`        | still-queued jobs re-launched when their VM never registered |
+| `unregisteredRelaunchExhausted()` | jobs left stranded after too many failed re-launches         |
+| `errors()`                        | failures the sweep isolated and continued past               |
+| `queuedJobScanTruncated()`        | 1 when a sweep hit its GitHub-listing cap mid-scan           |
 
 **Per runner class**, dimensioned by `RunnerSetId` and `SizeClass`, the launcher
 and warm pool emit one envelope per event. Each accessor takes the class label:
@@ -144,6 +146,16 @@ non-zero value is real: recovery is working, and something upstream is losing
 launches often enough to need it. Treat a persistently high count as a signal to
 find that cause, not as a healthy steady state. Setting the property to false
 silences the counter along with the recovery itself.
+
+`recoverStuckLaunches` also re-launches a job the instant its runner is reaped as
+`unregistered` — a VM that launched but never registered with GitHub, so the job
+never ran and stayed `queued`. The `unregisteredRelaunched()` counter reports
+those recoveries. A job that keeps failing to register is re-launched only a
+bounded number of times; past that the janitor stops and counts
+`unregisteredRelaunchExhausted()` and logs an error rather than looping
+silently. Any non-zero `unregisteredRelaunchExhausted` is a job that stranded
+despite recovery — a bad image, a broken egress route, or a boot that never
+completes — so it is worth an alarm of its own once `emitMetrics` is on.
 
 `stuckRunnersReapedAlarm` watches the janitor's `stuckRunnersReaped` counter —
 runners that registered with GitHub and then went nowhere, reaped once a second

@@ -124,6 +124,21 @@ interface RunnerRow {
   suspectSince?: string;
   orphanSince?: string;
   runnerId?: number;
+  /**
+   * Claim rows only (`job#<repo>#<jobId>`): the launcher's per-attempt hold
+   * token (see `launcher.ts`'s `acquireLaunchClaim`). Carried here so a claim
+   * restored after a failed relaunch send round-trips every attribute.
+   */
+  attemptToken?: string;
+  /**
+   * Claim rows only: how many times this job has already been re-launched by
+   * the janitor because a prior launch's VM never registered. Threaded through
+   * the re-enqueued `launch` message and re-stamped by the launcher onto the
+   * fresh claim, so it survives across relaunch cycles and bounds the loop —
+   * see {@link relaunchUnregisteredJob} and
+   * {@link MAX_UNREGISTERED_RELAUNCH_ATTEMPTS}.
+   */
+  relaunchAttempts?: number;
 }
 
 interface Metrics {
@@ -137,6 +152,10 @@ interface Metrics {
   stuckLaunchesRecovered: number;
   /** Count of committed-but-unserved launches re-launched from an orphaned claim (feature off -> always 0): the launch's VM is gone/TERMINATED but its GitHub job is still `queued`. A persistently high value means a non-outage bug — alarm on it. */
   stuckClaimsRelaunched: number;
+  /** Count of still-queued jobs re-launched at the moment their runner was reaped under rule `unregistered` (VM launched but never registered with GitHub; feature off -> always 0). A persistently high value means VMs are routinely failing to register — alarm on it. */
+  unregisteredRelaunched: number;
+  /** Count of `unregistered` reaps NOT relaunched because the job had already been re-launched {@link MAX_UNREGISTERED_RELAUNCH_ATTEMPTS} times and still never registered — the loop bound tripped. Any non-zero value is a job that stranded despite recovery; alarm on it. */
+  unregisteredRelaunchExhausted: number;
   /** Count of per-item failures caught and isolated (see `reconcileTable`/`pruneImageVersions`); a sweep with `errors > 0` still emits metrics and completes. */
   errors: number;
 }
@@ -151,6 +170,8 @@ function freshMetrics(): Metrics {
     tableRowsCleaned: 0,
     stuckLaunchesRecovered: 0,
     stuckClaimsRelaunched: 0,
+    unregisteredRelaunched: 0,
+    unregisteredRelaunchExhausted: 0,
     errors: 0,
   };
 }
@@ -172,6 +193,12 @@ interface JanitorContext {
   metrics: Metrics;
   /** target key ("org:<org>" | "repo:<owner>/<repo>") -> runnerName -> GithubRunner, filtered to this runner set's runner-name prefix. Populated lazily and refreshed by `freshGetRunner`'s re-list fallback. */
   runnersByTarget: Map<string, Map<string, GithubRunner>>;
+  /** `RECOVER_STUCK_LAUNCHES === 'true'` — gates BOTH the committed-claim reconcile and the `unregistered`-reap relaunch. */
+  recoverStuckLaunches: boolean;
+  /** The job queue URL, set only when {@link JanitorContext.recoverStuckLaunches} is on (the construct wires the env var unconditionally, but we require it only when the feature needs it). */
+  jobQueueUrl?: string;
+  /** claimKey (`job#<repo>#<jobId>`) -> claim row, built from THIS sweep's scan. Lets the `unregistered` reap find a job's committed claim without a second read. Populated by `reconcileTable`. */
+  claimsByKey: Map<string, RunnerRow>;
 }
 
 const {
@@ -469,11 +496,19 @@ async function freshGetRunner(
  *
  * `rule` names which reap fired, since the operator's next question after
  * "something killed my VM" is always "which rule, and was it right?".
+ *
+ * The VM's last-known launch/boot status (`vmState`, `vmStartedAt`,
+ * `vmImageArn`) rides along too — for an `unregistered` reap specifically
+ * (issue #48, gap 2) this is the only thing that tells a VM that produced no
+ * console output at all apart from a guest that booted and failed to register:
+ * the janitor already holds it on the `RunnerSetVm` from its list/get, so it
+ * costs no extra AWS call.
  */
 function logReap(params: {
   rule: 'orphan' | 'unregistered' | 'idle';
   vm: RunnerSetVm;
   row: RunnerRow | undefined;
+  nowMs: number;
 }): void {
   console.log(
     JSON.stringify({
@@ -482,6 +517,10 @@ function logReap(params: {
       microvmId: params.vm.microvmId,
       runnerName: params.row?.runnerName,
       launchedForJobId: params.row?.jobId,
+      vmState: params.vm.state,
+      vmStartedAt: params.vm.startedAt.toISOString(),
+      vmAgeSeconds: Math.round(vmAgeSeconds(params.vm, params.nowMs)),
+      vmImageArn: params.vm.imageArn,
     }),
   );
 }
@@ -589,7 +628,7 @@ async function reconcileOrphanVm(
       return;
     }
     await terminateMicrovm(vm.microvmId);
-    logReap({ rule: 'orphan', vm, row });
+    logReap({ rule: 'orphan', vm, row, nowMs: ctx.nowMs });
     await deleteRow(ctx.tableName, row.runnerName);
     ctx.metrics.orphansReaped += 1;
   }
@@ -646,9 +685,17 @@ async function handleAbsentFromList(
     await deleteRunner(target, row.runnerId);
   }
   await terminateMicrovm(vm.microvmId);
-  logReap({ rule: 'unregistered', vm, row });
+  logReap({ rule: 'unregistered', vm, row, nowMs: ctx.nowMs });
   await deleteRow(ctx.tableName, row.runnerName);
   ctx.metrics.orphansReaped += 1;
+  // Issue #48 gap 1: the VM launched but never registered, so GitHub still has
+  // the job `queued` and nothing else will ever ask again (a JIT launch is a
+  // one-shot answer to a one-shot announcement). Hand it straight to the
+  // relaunch path, in THIS invocation — the reap already knows the job
+  // and that its VM is gone. Best-effort and self-isolating: a throw here is
+  // caught by the per-row loop in `reconcileTable`, and the reap above has
+  // already fully committed.
+  await relaunchUnregisteredJob(ctx, vm, row);
 }
 
 /**
@@ -709,7 +756,7 @@ async function handleListedIdle(
   }
   await deleteRunner(target, fresh.id);
   await terminateMicrovm(vm.microvmId);
-  logReap({ rule: 'idle', vm, row });
+  logReap({ rule: 'idle', vm, row, nowMs: ctx.nowMs });
   await deleteRow(ctx.tableName, row.runnerName);
   ctx.metrics.stuckRunnersReaped += 1;
 }
@@ -912,6 +959,182 @@ async function reconcileCommittedClaim(
   );
 }
 
+/**
+ * How many times the janitor re-launches a job whose runner keeps getting
+ * reaped as `unregistered` before it gives up and RAISES instead of looping.
+ * A VM that never registers is usually transient (a lost egress route, a slow
+ * boot that outran the two-strike window), so a couple of retries clears it;
+ * a job that fails to register this many times is a real fault (a bad image, a
+ * broken network config) that quiet re-launching would mask forever — the
+ * operator's standard is no silent failure, so the bound trips a metric
+ * ({@link Metrics.unregisteredRelaunchExhausted}) and an error log instead.
+ */
+const MAX_UNREGISTERED_RELAUNCH_ATTEMPTS = 3;
+
+/**
+ * Issue #48 gap 1 — bounded, in-invocation relaunch of a job whose runner
+ * was just reaped under rule `unregistered` (the VM launched but never
+ * registered with GitHub, so GitHub still has the job `queued` and, a JIT
+ * launch being a one-shot answer to a one-shot announcement, nothing else will
+ * ever ask again). This is the SAME recovery `reconcileCommittedClaim` performs
+ * for a committed claim whose VM is gone, moved to fire the moment the reap
+ * makes the VM gone rather than waiting for a later sweep to observe it.
+ *
+ * Guards, in order:
+ *  - feature + queue: only when `recoverStuckLaunches` is on (same flag, same
+ *    grants — the janitor already holds `getWorkflowJob` and job-queue
+ *    send).
+ *  - NO DOUBLE LAUNCH: relaunch ONLY when the job's committed claim still
+ *    points at the VM we just reaped. A claim that is absent, still `'pending'`,
+ *    or committed to a DIFFERENT `microvmId` means a newer launch (a webhook
+ *    re-delivery, an earlier relaunch) already owns this job — leave it be.
+ *  - attempt bound: a job that has already been relaunched
+ *    {@link MAX_UNREGISTERED_RELAUNCH_ATTEMPTS} times and still never registers
+ *    RAISES (metric + error log) instead of looping.
+ *  - still queued: re-check GitHub exactly as the committed-claim path does; a
+ *    job since completed/cancelled/gone is left for hygiene.
+ *
+ * Ordering mirrors `reconcileCommittedClaim`: delete-the-claim-BEFORE-send (or
+ * `acquireLaunchClaim` self-suppresses the relaunch as a duplicate), restore it
+ * on send failure so a job is never stranded by a half-done recovery.
+ *
+ * Self-isolating: never throws — any unexpected error is counted on
+ * `ctx.metrics.errors` and logged, so this add-on can't break the reap that
+ * already committed above it.
+ */
+async function relaunchUnregisteredJob(
+  ctx: JanitorContext,
+  vm: RunnerSetVm,
+  row: RunnerRow,
+): Promise<void> {
+  if (!ctx.recoverStuckLaunches || !ctx.jobQueueUrl) {
+    return;
+  }
+  if (!row.repo || typeof row.jobId !== 'number') {
+    return; // no job to relaunch (shouldn't happen for a launcher mapping row)
+  }
+  const jobQueueUrl = ctx.jobQueueUrl;
+  const claimKey = `${CLAIM_ROW_PREFIX}${row.repo}#${row.jobId}`;
+  const claim = ctx.claimsByKey.get(claimKey);
+  if (!claim || !isCommittedClaim(claim) || claim.microvmId !== vm.microvmId) {
+    // A newer launch already owns this job (or there is no claim to reason
+    // from) — do NOT relaunch, or we'd double-launch. Logged so the
+    // decision is visible next to the reap.
+    console.log(
+      JSON.stringify({
+        msg: 'janitor: relaunch skipped',
+        rule: 'unregistered',
+        jobId: row.jobId,
+        reason: !claim
+          ? 'no-committed-claim'
+          : !isCommittedClaim(claim)
+            ? 'claim-pending'
+            : 'claim-superseded',
+      }),
+    );
+    return;
+  }
+  const attempts = claim.relaunchAttempts ?? 0;
+  if (attempts >= MAX_UNREGISTERED_RELAUNCH_ATTEMPTS) {
+    ctx.metrics.unregisteredRelaunchExhausted += 1;
+    console.error(
+      JSON.stringify({
+        msg: 'janitor: relaunch attempts exhausted',
+        rule: 'unregistered',
+        repo: row.repo,
+        jobId: row.jobId,
+        attempt: attempts,
+      }),
+    );
+    return;
+  }
+  try {
+    const [owner, name] = row.repo.split('/');
+    if (!owner || !name) {
+      return;
+    }
+    const job = await getWorkflowJob(
+      resolveTarget(ctx.scope, row.repo),
+      owner,
+      name,
+      row.jobId,
+    );
+    if (job?.status !== 'queued') {
+      console.log(
+        JSON.stringify({
+          msg: 'janitor: relaunch skipped',
+          rule: 'unregistered',
+          jobId: row.jobId,
+          reason: 'job-not-queued',
+          jobStatus: job?.status ?? 'gone',
+        }),
+      );
+      return;
+    }
+    const nextAttempt = attempts + 1;
+    await deleteRow(ctx.tableName, claim.runnerName);
+    try {
+      await sqsClient().send(
+        new SendMessageCommand({
+          QueueUrl: jobQueueUrl,
+          MessageBody: JSON.stringify({
+            kind: 'launch',
+            repo: row.repo,
+            jobId: row.jobId,
+            runId: job.runId,
+            labels: job.labels,
+            relaunchAttempts: nextAttempt,
+          }),
+        }),
+      );
+    } catch (sendErr) {
+      // Send failed AFTER the claim was deleted — restore it (scanned
+      // whole, so `marshall` round-trips every attribute) so the next sweep
+      // re-attempts rather than the job stranding. Best-effort; rethrow so the
+      // outer catch counts it.
+      try {
+        await ddbClient().send(
+          new PutItemCommand({
+            TableName: ctx.tableName,
+            Item: marshall(claim, { removeUndefinedValues: true }),
+          }),
+        );
+      } catch (restoreErr) {
+        console.error(
+          JSON.stringify({
+            scope: 'reconcile',
+            action: 'unregistered-relaunch-restore-failed',
+            runnerName: claim.runnerName,
+            err: serializeError(restoreErr),
+          }),
+        );
+      }
+      throw sendErr;
+    }
+    ctx.metrics.unregisteredRelaunched += 1;
+    console.log(
+      JSON.stringify({
+        msg: 'janitor: relaunched',
+        rule: 'unregistered',
+        repo: row.repo,
+        jobId: row.jobId,
+        attempt: nextAttempt,
+      }),
+    );
+  } catch (err) {
+    ctx.metrics.errors += 1;
+    console.error(
+      JSON.stringify({
+        scope: 'reconcile',
+        action: 'unregistered-relaunch-failed',
+        repo: row.repo,
+        jobId: row.jobId,
+        err: serializeError(err),
+      }),
+    );
+  }
+}
+
 async function reconcileTable(ctx: JanitorContext): Promise<void> {
   const imageVms = await listRunnerSetVms(runnerSetImageArns());
   const scannedRows = await scanRunnerTable(ctx.tableName);
@@ -971,11 +1194,12 @@ async function reconcileTable(ctx: JanitorContext): Promise<void> {
     }
   }
 
-  const recoverStuckLaunchesEnabled =
-    process.env.RECOVER_STUCK_LAUNCHES === 'true';
-  const jobQueueUrl = recoverStuckLaunchesEnabled
-    ? requireEnv('JOB_QUEUE_URL')
-    : undefined;
+  const recoverStuckLaunchesEnabled = ctx.recoverStuckLaunches;
+  const jobQueueUrl = ctx.jobQueueUrl;
+  // Index this sweep's committed claim rows by their launch-claim key so the
+  // `unregistered` reap (`handleAbsentFromList`) can find a job's claim without
+  // a second read — see `relaunchUnregisteredJob`.
+  ctx.claimsByKey = new Map(claimRows.map((c) => [c.runnerName, c]));
   const nowSeconds = Math.floor(ctx.nowMs / 1000);
   let committedClaimsReconciled = 0;
   for (const claimRow of claimRows) {
@@ -1543,7 +1767,7 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
   // installation-repositories endpoint, which a personal access token cannot
   // call (GitHub 403s). Skip the scan entirely rather than 403 on every sweep
   // and count a `sweepErrorsAlarm`-tripping error, and do NOT emit the class
-  // metrics \u2014 emitting 0s here would let the missing-data-breaching
+  // metrics — emitting 0s here would let the missing-data-breaching
   // `queuedJobAgeAlarm` look healthy when the scan never actually ran. The
   // construct refuses to synthesize `queuedJobAgeAlarm` in this configuration,
   // so no alarm depends on these metrics.
@@ -1633,6 +1857,8 @@ async function buildContext(): Promise<JanitorContext> {
   const intervalSeconds = numEnv('JANITOR_INTERVAL_SECONDS', 300);
   const maxJobDurationSeconds = numEnv('MAX_JOB_DURATION_SECONDS');
   const nowMs = Date.now();
+  const recoverStuckLaunchesEnabled =
+    process.env.RECOVER_STUCK_LAUNCHES === 'true';
   return {
     tableName: requireEnv('RUNNER_TABLE'),
     scope,
@@ -1645,6 +1871,14 @@ async function buildContext(): Promise<JanitorContext> {
     nowIso: new Date(nowMs).toISOString(),
     metrics: freshMetrics(),
     runnersByTarget: new Map(),
+    recoverStuckLaunches: recoverStuckLaunchesEnabled,
+    // Required only when the feature is on — the construct wires the env
+    // var unconditionally, but reading it eagerly when the feature is off
+    // would make a runner set that opted OUT fail its sweep.
+    ...(recoverStuckLaunchesEnabled
+      ? { jobQueueUrl: requireEnv('JOB_QUEUE_URL') }
+      : {}),
+    claimsByKey: new Map(),
   };
 }
 
