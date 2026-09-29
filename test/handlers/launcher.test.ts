@@ -317,6 +317,38 @@ describe('launch: happy path', () => {
     expect(claimUpdate?.ExpressionAttributeValues?.[':m'].S).toBe('mvm-123');
   });
 
+  it('a janitor relaunch (message.relaunchAttempts set) stamps the counter onto the claim so the janitor can bound the loop; a normal launch does not', async () => {
+    // Normal (webhook) launch: no relaunchAttempts on the message -> the claim
+    // is written WITHOUT the attribute (omit-when-unset).
+    await handler(
+      batchEvent([sqsRecord('m1', launchMessage())]),
+      {} as never,
+      undefined as never,
+    );
+    const normalClaim = ddbMock
+      .commandCalls(PutItemCommand)
+      .find(
+        (c) => c.args[0].input.Item?.runnerName?.S === 'job#acme/widgets#1001',
+      );
+    expect(normalClaim?.args[0].input.Item?.relaunchAttempts).toBeUndefined();
+
+    ddbMock.resetHistory();
+
+    // Relaunch from the janitor: relaunchAttempts threaded through the message
+    // is stamped onto the fresh claim.
+    await handler(
+      batchEvent([sqsRecord('m2', launchMessage({ relaunchAttempts: 2 }))]),
+      {} as never,
+      undefined as never,
+    );
+    const relaunchClaim = ddbMock
+      .commandCalls(PutItemCommand)
+      .find(
+        (c) => c.args[0].input.Item?.runnerName?.S === 'job#acme/widgets#1001',
+      );
+    expect(relaunchClaim?.args[0].input.Item?.relaunchAttempts?.N).toBe('2');
+  });
+
   it('powerless VM: with RUNNER_SET_VM_ROLE_ARN unset, RunMicrovm carries NO executionRoleArn', async () => {
     delete process.env.RUNNER_SET_VM_ROLE_ARN;
     const event = batchEvent([sqsRecord('m1', launchMessage())]);

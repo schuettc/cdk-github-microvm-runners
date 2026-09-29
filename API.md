@@ -1097,20 +1097,32 @@ GitHub announces a job once. If the launch that announcement triggered
 doesn't end with the job being served, nothing else ever asks again, and
 the job waits for as long as the workflow allows with no error anywhere —
 the plane looks healthy because by its own bookkeeping it did its work.
-Each janitor sweep closes that hole from two directions: it re-drives
-dead-lettered launch messages back onto the job queue, and it re-launches
-claims whose VM is gone while the job is still queued. Both check with
-GitHub first, so a job that has since completed or been cancelled is
-discarded rather than booting a VM for work nobody is waiting on.
+Each janitor sweep closes that hole from three directions: it re-drives
+dead-lettered launch messages back onto the job queue, it re-launches
+claims whose VM is gone while the job is still queued, and it re-launches a
+job the instant its runner is reaped as `unregistered` (a VM that launched
+but never registered with GitHub). All three check with GitHub first, so a
+job that has since completed or been cancelled is discarded rather than
+booting a VM for work nobody is waiting on. The two relaunch paths (the
+committed-claim reconciliation and the `unregistered` reap) share ONE
+per-job attempt counter, threaded through the launch message onto the fresh
+claim, so a job that repeatedly fails to register is relaunched only a
+bounded number of times in total; at the bound its claim is released
+(deleted, so nothing resurrects it) and the exhaustion is raised via a
+metric and an error log rather than looping. The job then stays queued for
+the operator to re-run once the cause is fixed.
 
 Turn it off only if you want a job that slips through to stay stuck. The
 cost of leaving it on is one extra GitHub read per sweep per candidate,
 bounded per sweep so it cannot exhaust the installation's rate limit.
 
-The janitor counts recoveries under the `stuckLaunchesRecovered` and
-`stuckClaimsRelaunched` metrics, which report when `emitMetrics` is on. A
-count that stays high means launches are failing for some ongoing reason
-and the recovery is masking it — alarm on it rather than ignoring it.
+The janitor counts recoveries under the `stuckLaunchesRecovered`,
+`stuckClaimsRelaunched`, and `unregisteredRelaunched` metrics, and jobs it
+released at the shared relaunch bound under `unregisteredRelaunchExhausted`
+(emitted from whichever recovery path hit the bound) — all report
+when `emitMetrics` is on. A count that stays high means launches are
+failing for some ongoing reason and the recovery is masking it — alarm on
+it rather than ignoring it.
 
 ---
 
@@ -2572,6 +2584,8 @@ alarm that could only ever page on missing data.
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.suspectsCleared">suspectsCleared</a></code> | Janitor sweep count: VMs an earlier sweep had marked as suspect, cleared because this sweep found them accounted for or working again. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.sweepErrorsAlarm">sweepErrorsAlarm</a></code> | Alarm on janitor sweep errors, the per-item failures a sweep isolates and continues past. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.tableRowsCleaned">tableRowsCleaned</a></code> | Janitor sweep count: runner table rows deleted, either because the VM they name is confirmed gone or because a real row superseded an orphaned one. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.unregisteredRelaunched">unregisteredRelaunched</a></code> | Janitor sweep count: still-queued jobs re-launched the moment their runner was reaped as `unregistered` (a VM that launched but never registered with GitHub). |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.unregisteredRelaunchExhausted">unregisteredRelaunchExhausted</a></code> | Janitor sweep count: jobs RELEASED (claim deleted) at the shared relaunch bound because they had already been re-launched the maximum number of times across BOTH recovery paths (the `unregistered` reap and the committed-claim reconciliation) and still never registered. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.warmHit">warmHit</a></code> | Launches served from the warm pool: a pre-booted VM claimed and resumed rather than a new one launched. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.warmSpinUpMs">warmSpinUpMs</a></code> | Milliseconds to spin up a warm launch: claiming the VM, resuming it, and pushing the runner's registration. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.warmThrottled">warmThrottled</a></code> | Warm-pool claims that were throttled and fell back to booting a new VM. |
@@ -3084,6 +3098,26 @@ public tableRowsCleaned(): Metric
 ```
 
 Janitor sweep count: runner table rows deleted, either because the VM they name is confirmed gone or because a real row superseded an orphaned one.
+
+##### `unregisteredRelaunched` <a name="unregisteredRelaunched" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.unregisteredRelaunched"></a>
+
+```typescript
+public unregisteredRelaunched(): Metric
+```
+
+Janitor sweep count: still-queued jobs re-launched the moment their runner was reaped as `unregistered` (a VM that launched but never registered with GitHub).
+
+This is 0 unless `recoverStuckLaunches` is on. A value that stays high means VMs are routinely failing to register — alarm on it.
+
+##### `unregisteredRelaunchExhausted` <a name="unregisteredRelaunchExhausted" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.unregisteredRelaunchExhausted"></a>
+
+```typescript
+public unregisteredRelaunchExhausted(): Metric
+```
+
+Janitor sweep count: jobs RELEASED (claim deleted) at the shared relaunch bound because they had already been re-launched the maximum number of times across BOTH recovery paths (the `unregistered` reap and the committed-claim reconciliation) and still never registered.
+
+The released job stays `queued` for the operator to re-run once the cause is fixed. Any non-zero value is a job that stranded despite recovery — alarm on it. This is 0 unless `recoverStuckLaunches` is on.
 
 ##### `warmHit` <a name="warmHit" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.warmHit"></a>
 

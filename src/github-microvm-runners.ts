@@ -364,20 +364,32 @@ export interface GithubMicrovmRunnersProps {
    * doesn't end with the job being served, nothing else ever asks again, and
    * the job waits for as long as the workflow allows with no error anywhere —
    * the plane looks healthy because by its own bookkeeping it did its work.
-   * Each janitor sweep closes that hole from two directions: it re-drives
-   * dead-lettered launch messages back onto the job queue, and it re-launches
-   * claims whose VM is gone while the job is still queued. Both check with
-   * GitHub first, so a job that has since completed or been cancelled is
-   * discarded rather than booting a VM for work nobody is waiting on.
+   * Each janitor sweep closes that hole from three directions: it re-drives
+   * dead-lettered launch messages back onto the job queue, it re-launches
+   * claims whose VM is gone while the job is still queued, and it re-launches a
+   * job the instant its runner is reaped as `unregistered` (a VM that launched
+   * but never registered with GitHub). All three check with GitHub first, so a
+   * job that has since completed or been cancelled is discarded rather than
+   * booting a VM for work nobody is waiting on. The two relaunch paths (the
+   * committed-claim reconciliation and the `unregistered` reap) share ONE
+   * per-job attempt counter, threaded through the launch message onto the fresh
+   * claim, so a job that repeatedly fails to register is relaunched only a
+   * bounded number of times in total; at the bound its claim is released
+   * (deleted, so nothing resurrects it) and the exhaustion is raised via a
+   * metric and an error log rather than looping. The job then stays queued for
+   * the operator to re-run once the cause is fixed.
    *
    * Turn it off only if you want a job that slips through to stay stuck. The
    * cost of leaving it on is one extra GitHub read per sweep per candidate,
    * bounded per sweep so it cannot exhaust the installation's rate limit.
    *
-   * The janitor counts recoveries under the `stuckLaunchesRecovered` and
-   * `stuckClaimsRelaunched` metrics, which report when `emitMetrics` is on. A
-   * count that stays high means launches are failing for some ongoing reason
-   * and the recovery is masking it — alarm on it rather than ignoring it.
+   * The janitor counts recoveries under the `stuckLaunchesRecovered`,
+   * `stuckClaimsRelaunched`, and `unregisteredRelaunched` metrics, and jobs it
+   * released at the shared relaunch bound under `unregisteredRelaunchExhausted`
+   * (emitted from whichever recovery path hit the bound) — all report
+   * when `emitMetrics` is on. A count that stays high means launches are
+   * failing for some ongoing reason and the recovery is masking it — alarm on
+   * it rather than ignoring it.
    * @default true
    */
   readonly recoverStuckLaunches?: boolean;
@@ -560,6 +572,16 @@ export class GithubMicrovmRunnersMetrics {
   /** Janitor sweep count: launches that were claimed but never served, re-launched from the orphaned claim. This is 0 unless `recoverStuckLaunches` is on. */
   public stuckClaimsRelaunched(): cloudwatch.Metric {
     return this.emfMetric('stuckClaimsRelaunched');
+  }
+
+  /** Janitor sweep count: still-queued jobs re-launched the moment their runner was reaped as `unregistered` (a VM that launched but never registered with GitHub). This is 0 unless `recoverStuckLaunches` is on. A value that stays high means VMs are routinely failing to register — alarm on it. */
+  public unregisteredRelaunched(): cloudwatch.Metric {
+    return this.emfMetric('unregisteredRelaunched');
+  }
+
+  /** Janitor sweep count: jobs RELEASED (claim deleted) at the shared relaunch bound because they had already been re-launched the maximum number of times across BOTH recovery paths (the `unregistered` reap and the committed-claim reconciliation) and still never registered. The released job stays `queued` for the operator to re-run once the cause is fixed. Any non-zero value is a job that stranded despite recovery — alarm on it. This is 0 unless `recoverStuckLaunches` is on. */
+  public unregisteredRelaunchExhausted(): cloudwatch.Metric {
+    return this.emfMetric('unregisteredRelaunchExhausted');
   }
 
   /** Janitor sweep count: failures on individual VMs, rows, or image versions during a sweep. The sweep isolates each one and still completes. */

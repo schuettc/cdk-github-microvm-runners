@@ -511,6 +511,14 @@ describe('GithubMicrovmRunners: minimal instantiation', () => {
         () => runners.metrics.stuckLaunchesRecovered(),
       ],
       ['stuckClaimsRelaunched', () => runners.metrics.stuckClaimsRelaunched()],
+      [
+        'unregisteredRelaunched',
+        () => runners.metrics.unregisteredRelaunched(),
+      ],
+      [
+        'unregisteredRelaunchExhausted',
+        () => runners.metrics.unregisteredRelaunchExhausted(),
+      ],
       ['errors', () => runners.metrics.errors()],
     ];
 
