@@ -51,6 +51,8 @@ puts its `workflow_job` events on the webhook. Add the repository under
 **Repository access** on the App's installation, alongside the ones the runner
 set already serves.
 
+A public repository also needs its runner group to allow it. The runner set registers its runners in the organization's Default runner group, which serves public repositories only when its **Allow public repositories** setting is on, and an organization's Default group has it off. Until it's on, GitHub never dispatches a public repository's jobs to the runner set, and they wait queued with no error.
+
 ## 2. Declare the labels to actionlint
 
 If the repository lints its workflows with
