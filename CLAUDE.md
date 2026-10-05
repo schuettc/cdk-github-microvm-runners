@@ -64,6 +64,8 @@ finding.
 
 Branches: `feat/*` → `dev` → `main`, pull requests only.
 
+`dev` has "include administrators" turned off in branch protection on purpose. After each `dev` → `main` promotion, `dev` is fast-forwarded to `main` (`git merge --ff-only origin/main`, pushed to `dev`), and that push needs the admin bypass. Don't re-enable it. `main` keeps it on.
+
 `package.json`, the tsconfigs, the eslint config, and the workflows are
 generated from `.projenrc.ts`. Edit that file and re-synth — the gate reverts
 hand edits to generated files.
@@ -121,6 +123,12 @@ debugging something that looks broken.
   is counted: a launch skipped because "its" job is already done removes a runner
   the pool may still owe to a job that is still queued. Terminate is safe here
   because it is keyed by runner name, which follows the runner to the right VM.
+- A VM launch **restores the snapshot's running agent process**. Module-level code and the `/ready` hook run once, at image build, and only `/run` fires per launch. The kernel page cache is not in the snapshot, so warming files at build time does nothing for a launched VM.
+- IAM **rejects a role `description` containing an em dash** (allowed: printable ASCII plus Latin-1), and the whole deploy fails with `InvalidRequest`. This repo's prose uses em dashes freely, so keep them out of IAM descriptions in code and examples.
+
+## Agent-facing artifacts
+
+The skills in `.claude/skills/` ship to consumers, in the npm tarball under `skills/` and at runnerset.dev/skills/, so they are public API: review edits to them as such. `/llms.txt` is hand-authored in `site/src/llms-details.md`. The site's prebuild (`site/scripts/prepare-agent-artifacts.mjs`) fails if a guide or skill is missing from its routing table, so a new `docs/*.md` or skill must be added there. The site deploys from `main` only.
 
 ## Worktrees
 

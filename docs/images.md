@@ -61,6 +61,8 @@ The daemon's boot log is written to `/var/log/microvm-runner-dockerd.log`,
 readable from any job step. When a `docker` command cannot reach the daemon,
 that file says why.
 
+Multi-architecture builds through QEMU/binfmt do not work in a VM: the installer reports success but `/proc/sys/fs/binfmt_misc` stays empty, so amd64 images fail with an exec-format error. The buildx `docker-container` driver works when the builder is created with `--buildkitd-flags '--allow-insecure-entitlement network.host'` and the build runs with `--allow network.host --network=host`; `--driver-opt network=host` alone does not give `RUN` steps a network.
+
 ## One image per runner class
 
 A runner class's size is part of its image. The size is written onto the image
