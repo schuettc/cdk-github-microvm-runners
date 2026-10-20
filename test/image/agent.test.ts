@@ -1,7 +1,7 @@
 /**
  * Unit tests for the pure pieces of the in-VM agent (`src/image/assets/agent.mjs`):
  * `buildRunnerArgs`, the injected-clock readiness poll `waitForDockerReady`, and
- * the start/wait/timeout decision in `decideAndStartRunner`.
+ * the restart/start/wait/timeout decision in `decideAndStartRunner`.
  *
  * The agent is dependency-free ESM shipped verbatim into the image. jest runs as
  * CommonJS and can't `import` the `.mjs` without --experimental-vm-modules, so the
@@ -24,6 +24,8 @@ interface Scenarios {
   waitsThenStarts: { started: string[] };
   timesOut: { started: string[]; logs: string[] };
   timesOutUnreadableLog: { logs: string[] };
+  restartsExitedDockerd: { events: string[]; logs: string[] };
+  leavesRunningDockerd: { events: string[]; logs: string[] };
 }
 
 let s: Scenarios;
@@ -106,5 +108,28 @@ describe('decideAndStartRunner', () => {
       'dockerd not ready after 120s; not accepting a job',
       '/var/log/microvm-runner-dockerd.log could not be read: Error: ENOENT: no such file or directory',
     ]);
+  });
+
+  it('restarts a dockerd that exited before /run once, then waits for it, then starts the runner', () => {
+    // A warm VM suspended mid-start loses its dockerd (issue #55).
+    expect(s.restartsExitedDockerd.events).toEqual([
+      'check',
+      'restart',
+      'probe',
+      'probe',
+      'start JITCFG',
+    ]);
+    expect(s.restartsExitedDockerd.logs).toEqual([
+      'dockerd is not running (code 1); restarting',
+    ]);
+  });
+
+  it('leaves a running dockerd alone', () => {
+    expect(s.leavesRunningDockerd.events).toEqual([
+      'check',
+      'probe',
+      'start JITCFG',
+    ]);
+    expect(s.leavesRunningDockerd.logs).toEqual([]);
   });
 });

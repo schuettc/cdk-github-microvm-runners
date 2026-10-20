@@ -98,6 +98,7 @@ async function run() {
     let calls = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      dockerdStopped: () => null,
       probe: async () => (calls += 1) >= 2,
       start: (cfg) => started.push(cfg),
       sleep: async (ms) => {
@@ -119,6 +120,7 @@ async function run() {
     const dockerdLog = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      dockerdStopped: () => null,
       probe: async () => false,
       start: (cfg) => started.push(cfg),
       log: (m) => logs.push(m),
@@ -139,6 +141,7 @@ async function run() {
     let clock = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      dockerdStopped: () => null,
       probe: async () => false,
       start: () => {},
       log: (m) => logs.push(m),
@@ -153,6 +156,52 @@ async function run() {
       intervalMs: 1_000,
     });
     out.timesOutUnreadableLog = { logs };
+  }
+
+  // dockerd exited before /run (a warm VM suspended mid-start): restarted
+  // once, then waited for, then the runner started.
+  {
+    const events = [];
+    const logs = [];
+    let calls = 0;
+    await decideAndStartRunner('JITCFG', {
+      hasDockerd: () => true,
+      dockerdStopped: () => {
+        events.push('check');
+        return 'code 1';
+      },
+      restartDockerd: () => events.push('restart'),
+      probe: async () => {
+        events.push('probe');
+        return (calls += 1) >= 2;
+      },
+      start: (cfg) => events.push(`start ${cfg}`),
+      log: (m) => logs.push(m),
+      sleep: async () => {},
+    });
+    out.restartsExitedDockerd = { events, logs };
+  }
+
+  // dockerd still running at /run: checked, not restarted.
+  {
+    const events = [];
+    const logs = [];
+    await decideAndStartRunner('JITCFG', {
+      hasDockerd: () => true,
+      dockerdStopped: () => {
+        events.push('check');
+        return null;
+      },
+      restartDockerd: () => events.push('restart'),
+      probe: async () => {
+        events.push('probe');
+        return true;
+      },
+      start: (cfg) => events.push(`start ${cfg}`),
+      log: (m) => logs.push(m),
+      sleep: async () => {},
+    });
+    out.leavesRunningDockerd = { events, logs };
   }
 
   process.stdout.write(JSON.stringify(out));
