@@ -23,6 +23,7 @@ interface Scenarios {
   noDockerd: { started: string[]; probes: number };
   waitsThenStarts: { started: string[] };
   timesOut: { started: string[]; logs: string[] };
+  timesOutUnreadableLog: { logs: string[] };
 }
 
 let s: Scenarios;
@@ -86,10 +87,24 @@ describe('decideAndStartRunner', () => {
     expect(s.waitsThenStarts.started).toEqual(['JITCFG']);
   });
 
-  it('when dockerd times out, does not start the runner and logs exactly one line', () => {
+  it('when dockerd times out, does not start the runner and logs the refusal then the tail of the dockerd log', () => {
     expect(s.timesOut.started).toEqual([]); // no runner started
-    expect(s.timesOut.logs).toEqual([
+    // The refusal line is grepped for by operators: it stays first and unchanged.
+    expect(s.timesOut.logs[0]).toBe(
       'dockerd not ready after 120s; not accepting a job',
+    );
+    // Then the last 50 of the log's 60 lines, under a header naming the file.
+    const tail = Array.from({ length: 50 }, (_, i) => `line ${i + 11}`);
+    expect(s.timesOut.logs.slice(1)).toEqual([
+      '--- last 50 lines of /var/log/microvm-runner-dockerd.log ---',
+      ...tail,
+    ]);
+  });
+
+  it('when dockerd times out and its log cannot be read, logs one line saying so with the error', () => {
+    expect(s.timesOutUnreadableLog.logs).toEqual([
+      'dockerd not ready after 120s; not accepting a job',
+      '/var/log/microvm-runner-dockerd.log could not be read: Error: ENOENT: no such file or directory',
     ]);
   });
 });

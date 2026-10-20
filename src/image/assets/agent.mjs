@@ -21,7 +21,7 @@
 // the looser suffix match here.
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { openSync, mkdirSync, realpathSync } from 'node:fs';
+import { openSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const PORT = 8080;
@@ -37,6 +37,10 @@ export const DOCKER_READY_TIMEOUT_MS = 120_000;
 // Poll interval for the readiness probe — short so the runner starts promptly
 // once the daemon is up, without busy-spinning `docker info`.
 export const DOCKER_POLL_INTERVAL_MS = 1_000;
+// Where dockerd's stdout/stderr go, and how much of it is echoed to the console
+// when the agent refuses a job because dockerd never answered.
+const DOCKERD_LOG = '/var/log/microvm-runner-dockerd.log';
+const DOCKERD_LOG_TAIL_LINES = 50;
 
 let runnerStarted = false;
 let dockerStarted = false;
@@ -131,13 +135,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 //                          host netfilter modules; disabling it lets builds
 //                          and host-network runs work.
 // Output is logged to /var/log/microvm-runner-dockerd.log (NOT swallowed) so a failure
-// is diagnosable from inside the job. Idempotent: only the first call starts it.
+// is diagnosable from inside a job, and when dockerd never answers and no job
+// runs, decideAndStartRunner prints the log's tail to the console instead.
+// Idempotent: only the first call starts it.
 function startDockerd() {
   if (dockerStarted) return;
   dockerStarted = true;
   try {
     mkdirSync('/var/log', { recursive: true });
-    const log = openSync('/var/log/microvm-runner-dockerd.log', 'a');
+    const log = openSync(DOCKERD_LOG, 'a');
     const d = spawn('dockerd', ['--storage-driver=vfs', '--iptables=false'], {
       stdio: ['ignore', log, log],
       detached: true,
@@ -166,13 +172,16 @@ function startRunner(jitConfig) {
  * so the bounded wait here can't trip the platform's short /run hook timeout.
  *
  * No silent fallback: if the image has dockerd and it does not answer within
- * the bound, the runner is NOT started and exactly one line is logged. The job
- * stays queued, so the launcher's stuck-launch recovery and `queuedJobAgeAlarm`
- * surface it — far better than taking the job onto a VM whose `docker` commands
- * would fail. An image without dockerd starts immediately, unchanged.
+ * the bound, the runner is NOT started: one line says so, followed by the tail
+ * of dockerd's own log (or one line saying it could not be read), since no job
+ * will run to show it. The job stays queued, so the launcher's stuck-launch
+ * recovery and `queuedJobAgeAlarm` surface it — far better than taking the job
+ * onto a VM whose `docker` commands would fail. An image without dockerd
+ * starts immediately, unchanged.
  *
- * The daemon detection, readiness probe, runner start, log sink, and clock are
- * injectable (defaulting to the real ones) so the whole decision — start now /
+ * The daemon detection, readiness probe, runner start, log sink, dockerd log
+ * reader, and clock are injectable (defaulting to the real ones) so the whole
+ * decision — start now /
  * wait then start / time out and don't start — is unit-testable without a VM.
  */
 export async function decideAndStartRunner(
@@ -182,6 +191,7 @@ export async function decideAndStartRunner(
     probe = dockerInfoProbe,
     start = startRunner,
     log = (m) => console.log(m),
+    readDockerdLog = () => readFileSync(DOCKERD_LOG, 'utf8'),
     sleep: sleepFn = sleep,
     now,
     timeoutMs,
@@ -203,9 +213,33 @@ export async function decideAndStartRunner(
     log(
       `dockerd not ready after ${DOCKER_READY_TIMEOUT_MS / 1000}s; not accepting a job`,
     );
+    logDockerdTail(readDockerdLog, log);
     return;
   }
   start(jitConfig);
+}
+
+/**
+ * Log the last DOCKERD_LOG_TAIL_LINES lines of dockerd's log under a header,
+ * or one line saying why there is nothing to show.
+ */
+function logDockerdTail(readDockerdLog, log) {
+  let text;
+  try {
+    text = readDockerdLog();
+  } catch (e) {
+    log(`${DOCKERD_LOG} could not be read: ${e}`);
+    return;
+  }
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  if (lines.length === 0) {
+    log(`${DOCKERD_LOG} is empty`);
+    return;
+  }
+  const tail = lines.slice(-DOCKERD_LOG_TAIL_LINES);
+  log(`--- last ${tail.length} lines of ${DOCKERD_LOG} ---`);
+  for (const line of tail) log(line);
 }
 
 function handleRequest(req, res) {

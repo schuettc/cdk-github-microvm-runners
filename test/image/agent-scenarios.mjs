@@ -110,16 +110,19 @@ async function run() {
     out.waitsThenStarts = { started };
   }
 
-  // dockerd times out: do not start, log exactly one line.
+  // dockerd times out: do not start; log the refusal, then the log's last 50
+  // of its 60 lines under a header.
   {
     const started = [];
     const logs = [];
     let clock = 0;
+    const dockerdLog = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
       probe: async () => false,
       start: (cfg) => started.push(cfg),
       log: (m) => logs.push(m),
+      readDockerdLog: () => dockerdLog.join('\n') + '\n',
       sleep: async (ms) => {
         clock += ms;
       },
@@ -128,6 +131,28 @@ async function run() {
       intervalMs: 1_000,
     });
     out.timesOut = { started, logs };
+  }
+
+  // dockerd times out and its log can't be read: one fallback line.
+  {
+    const logs = [];
+    let clock = 0;
+    await decideAndStartRunner('JITCFG', {
+      hasDockerd: () => true,
+      probe: async () => false,
+      start: () => {},
+      log: (m) => logs.push(m),
+      readDockerdLog: () => {
+        throw new Error('ENOENT: no such file or directory');
+      },
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+      timeoutMs: 120_000,
+      intervalMs: 1_000,
+    });
+    out.timesOutUnreadableLog = { logs };
   }
 
   process.stdout.write(JSON.stringify(out));
