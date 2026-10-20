@@ -1,7 +1,7 @@
 /**
  * Unit tests for the pure pieces of the in-VM agent (`src/image/assets/agent.mjs`):
  * `buildRunnerArgs`, the injected-clock readiness poll `waitForDockerReady`, and
- * the bounded `docker info` check `dockerInfoProbe`, and the start/wait/timeout
+ * the bounded check `commandProbe`, `dockerdArgs`, and the start/wait/timeout
  * decision in `decideAndStartRunner`.
  *
  * The agent is dependency-free ESM shipped verbatim into the image. jest runs as
@@ -21,12 +21,26 @@ interface Scenarios {
   notMainWhenNoArgv: boolean;
   readyOnProbeSuccess: { ready: boolean; calls: number };
   timeout: { ready: boolean; calls: number };
-  noDockerd: { started: string[]; probes: number; dockerdStarts: number };
+  noDockerd: {
+    started: string[];
+    probes: number;
+    dockerdStarts: number;
+    containerdStarts: number;
+  };
   waitsThenStarts: { started: string[] };
   timesOut: { started: string[]; logs: string[] };
   timesOutUnreadableLog: { logs: string[] };
-  startsDockerdAtJob: { calls: string[] };
-  logsReadyTime: { events: string[] };
+  startsInOrder: { calls: string[] };
+  dockerdAfterContainerd: { calls: string[] };
+  containerdNeverAnswers: { calls: string[]; logs: string[] };
+  sharedBudget: {
+    budgets: number[];
+    endedAt: number;
+    logs: string[];
+    dockerdStartedAt: number;
+  };
+  logsReadyTimes: { events: string[] };
+  dockerdArgs: string[];
   probeBudgets: { budgets: number[] };
   hungProbe: {
     result: boolean;
@@ -92,7 +106,7 @@ describe('waitForDockerReady', () => {
   });
 });
 
-describe('dockerInfoProbe', () => {
+describe('commandProbe', () => {
   it('resolves false and kills the child when the check outlives its timeout', () => {
     expect(s.hungProbe.during).not.toBe(''); // the child was running
     expect(s.hungProbe.result).toBe(false);
@@ -102,23 +116,61 @@ describe('dockerInfoProbe', () => {
 });
 
 describe('decideAndStartRunner', () => {
-  it('starts dockerd when the job arrives, before the first probe, then starts the runner once it answers', () => {
-    expect(s.startsDockerdAtJob.calls).toEqual([
+  it('starts containerd, waits for it, then starts dockerd, waits for it, then the runner', () => {
+    expect(s.startsInOrder.calls).toEqual([
+      'startContainerd',
+      'containerdProbe',
       'startDockerd',
       'probe',
       'start(JITCFG)',
     ]);
   });
 
-  it('starts neither dockerd nor a probe on an image without dockerd', () => {
+  it('starts dockerd only after containerd answers', () => {
+    // containerd failed twice, then answered: dockerd comes after the third probe.
+    expect(s.dockerdAfterContainerd.calls).toEqual([
+      'startContainerd',
+      'containerdProbe',
+      'containerdProbe',
+      'containerdProbe',
+      'startDockerd',
+      'probe',
+      'start(JITCFG)',
+    ]);
+  });
+
+  it('refuses the job without starting dockerd when containerd never answers', () => {
+    expect(s.containerdNeverAnswers.calls).not.toContain('startDockerd');
+    expect(s.containerdNeverAnswers.calls).not.toContain('start(JITCFG)');
+    expect(s.containerdNeverAnswers.logs).toEqual([
+      'dockerd not ready after 120s; not accepting a job',
+      '--- last 1 lines of /var/log/microvm-runner-dockerd.log ---',
+      'containerd line',
+    ]);
+  });
+
+  it('containerd and dockerd share one 120 s budget', () => {
+    expect(s.sharedBudget.dockerdStartedAt).toBe(100000);
+    expect(s.sharedBudget.budgets[0]).toBeLessThanOrEqual(10000);
+    expect(s.sharedBudget.endedAt).toBeLessThanOrEqual(120000);
+    expect(s.sharedBudget.logs.slice(0, 2)).toEqual([
+      'containerd ready after 100.0s',
+      'dockerd not ready after 120s; not accepting a job',
+    ]);
+    expect(s.sharedBudget.logs).not.toContain('start');
+  });
+
+  it('starts nothing and probes nothing on an image without dockerd', () => {
     expect(s.noDockerd.started).toEqual(['JITCFG']);
+    expect(s.noDockerd.containerdStarts).toBe(0);
     expect(s.noDockerd.dockerdStarts).toBe(0);
     expect(s.noDockerd.probes).toBe(0);
   });
 
-  it('logs how long dockerd took to answer', () => {
-    expect(s.logsReadyTime.events).toEqual([
-      'dockerd ready after 37.0s',
+  it('logs how long containerd and dockerd took', () => {
+    expect(s.logsReadyTimes.events).toEqual([
+      'containerd ready after 8.0s',
+      'dockerd ready after 11.0s',
       'start(JITCFG)',
     ]);
   });
@@ -129,13 +181,15 @@ describe('decideAndStartRunner', () => {
 
   it('when dockerd times out, does not start the runner and logs the refusal then the tail of the dockerd log', () => {
     expect(s.timesOut.started).toEqual([]); // no runner started
-    // The refusal line is grepped for by operators: it stays first and unchanged.
-    expect(s.timesOut.logs[0]).toBe(
+    // containerd answered at once; then the refusal line, which operators grep
+    // for, unchanged.
+    expect(s.timesOut.logs.slice(0, 2)).toEqual([
+      'containerd ready after 0.0s',
       'dockerd not ready after 120s; not accepting a job',
-    );
+    ]);
     // Then the last 50 of the log's 60 lines, under a header naming the file.
     const tail = Array.from({ length: 50 }, (_, i) => `line ${i + 11}`);
-    expect(s.timesOut.logs.slice(1)).toEqual([
+    expect(s.timesOut.logs.slice(2)).toEqual([
       '--- last 50 lines of /var/log/microvm-runner-dockerd.log ---',
       ...tail,
     ]);
@@ -143,8 +197,19 @@ describe('decideAndStartRunner', () => {
 
   it('when dockerd times out and its log cannot be read, logs one line saying so with the error', () => {
     expect(s.timesOutUnreadableLog.logs).toEqual([
+      'containerd ready after 0.0s',
       'dockerd not ready after 120s; not accepting a job',
       '/var/log/microvm-runner-dockerd.log could not be read: Error: ENOENT: no such file or directory',
+    ]);
+  });
+});
+
+describe('dockerdArgs', () => {
+  it("points dockerd at the agent's containerd", () => {
+    expect(s.dockerdArgs).toEqual([
+      '--containerd=/run/containerd/containerd.sock',
+      '--storage-driver=vfs',
+      '--iptables=false',
     ]);
   });
 });

@@ -26,11 +26,13 @@ those, and how to supply a Dockerfile of your own instead.
 ## Containers in a job
 
 A job can build and run containers. The base image carries the Docker engine,
-and the VM's agent starts `dockerd`, as root, when the job's configuration
-arrives — not at boot. On a Docker-capable image the agent will not accept a
-job until `dockerd` actually answers: once it has started the daemon it waits
-(up to 120 seconds) for a real `docker info` to succeed before starting the
-runner, and logs how long that took. A job on a Docker image therefore waits
+and the VM's agent starts it, as root, when the job's configuration arrives —
+not at boot. It starts `containerd` first and waits for it to answer, then
+starts `dockerd` pointed at that `containerd`, the same order the
+distribution's own `containerd` and `docker` services use. On a Docker-capable
+image the agent will not accept a job until `dockerd` actually answers: it
+waits up to 120 seconds in total, for both daemons, for a real `docker info`
+to succeed before starting the runner, and logs how long each daemon took. A job on a Docker image therefore waits
 for the daemon to start, on a cold VM and a warm one alike. So a job never
 lands on a VM whose `docker` commands would fail because the daemon had not
 finished starting — the race that a job arriving a second after the runner
@@ -59,8 +61,8 @@ a job:
   `docker build` when a build step fetches from the network. `docker pull`
   itself is unaffected — the daemon fetches from the host side.
 
-The daemon's log is written to `/var/log/microvm-runner-dockerd.log`,
-readable from any job step. When a `docker` command cannot reach the daemon,
+The output of both daemons, `containerd` and `dockerd`, is written to
+`/var/log/microvm-runner-dockerd.log`, readable from any job step. When a `docker` command cannot reach the daemon,
 that file says why.
 
 Multi-architecture builds through QEMU/binfmt do not work in a VM: the installer reports success but `/proc/sys/fs/binfmt_misc` stays empty, so amd64 images fail with an exec-format error. The buildx `docker-container` driver works when the builder is created with `--buildkitd-flags '--allow-insecure-entitlement network.host'` and the build runs with `--allow network.host --network=host`; `--driver-opt network=host` alone does not give `RUN` steps a network.
