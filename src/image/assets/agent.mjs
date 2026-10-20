@@ -209,11 +209,16 @@ function startRunner(jitConfig) {
  * VM is suspended seconds after it boots, and a dockerd suspended mid-start
  * finds its containerd wait long past its deadline on resume and exits
  * ("failed to start containerd: timeout waiting for containerd to start",
- * issue #55). So before waiting, a dockerd that is no longer running is
- * started again, with one line saying so; a running one is left alone. Once
- * per job is enough: after /run the VM is not suspended again. Nothing needs
- * cleaning up first: the dead dockerd removed its pid file, its containerd
- * died with it, and a new dockerd starts a fresh containerd.
+ * issue #55). The platform sends /run as soon as the VM resumes, and dockerd
+ * notices its deadline and exits a moment later, so a check made once at /run
+ * can still see it running. The check is therefore part of the wait: on each
+ * poll where `docker info` fails, a dockerd that is no longer running is
+ * started again, with one line saying so; a running one is left alone. At
+ * most once per job: after /run the VM is not suspended again, so a dockerd
+ * that dies after its restart has a real fault and ends in the refusal and
+ * log tail below rather than a restart loop. Nothing needs cleaning up first:
+ * the dead dockerd removed its pid file, its containerd died with it, and a
+ * new dockerd starts a fresh containerd.
  *
  * The daemon detection, dockerd status and (re)start, readiness probe, runner
  * start, log sink, dockerd log reader, and clock are injectable (defaulting to
@@ -240,13 +245,21 @@ export async function decideAndStartRunner(
     start(jitConfig);
     return;
   }
-  const stopped = dockerdStopped();
-  if (stopped) {
-    log(`dockerd is not running (${stopped}); restarting`);
-    restartDockerd();
-  }
+  let restarted = false;
+  const probeOrRestart = async () => {
+    if (await probe()) return true;
+    if (!restarted) {
+      const stopped = dockerdStopped();
+      if (stopped) {
+        restarted = true;
+        log(`dockerd is not running (${stopped}); restarting`);
+        restartDockerd();
+      }
+    }
+    return false;
+  };
   const ready = await waitForDockerReady({
-    probe,
+    probe: probeOrRestart,
     sleep: sleepFn,
     now,
     timeoutMs,
@@ -299,8 +312,8 @@ function handleRequest(req, res) {
       // run recreational-spreadsheeting/ci-runners 36222878239; an earlier
       // narrowing on 2026-07-19 left the window open). So booting the daemon
       // early is only half the fix: /run below still waits for `docker info` to
-      // actually answer before starting the runner, and starts dockerd again
-      // if a suspend killed it mid-start. Idempotent — safe if /ready is
+      // actually answer before starting the runner, and while it waits starts
+      // dockerd again if a suspend killed it mid-start. Idempotent — safe if /ready is
       // called more than once.
       startDockerd();
       res.writeHead(200);

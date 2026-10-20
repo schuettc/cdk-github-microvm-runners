@@ -158,51 +158,61 @@ async function run() {
     out.timesOutUnreadableLog = { logs };
   }
 
-  // dockerd exited before /run (a warm VM suspended mid-start): restarted
-  // once, then waited for, then the runner started.
-  {
-    const events = [];
+  // A fake dockerd for the restart scenarios. Each entry of `lives` is one run
+  // of the daemon (the first is the one started at /ready, each later one a
+  // restart): `docker info` answers from its `upAt`-th probe, and on its
+  // `diesAt`-th probe it has exited (code 1) instead, as a warm VM's dockerd
+  // does a moment after resume.
+  async function withFakeDockerd(lives) {
     const logs = [];
-    let calls = 0;
+    const started = [];
+    let life = 0;
+    let alive = true;
+    let age = 0;
+    let checks = 0;
+    let restarts = 0;
+    let clock = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
       dockerdStopped: () => {
-        events.push('check');
-        return 'code 1';
+        checks += 1;
+        return alive ? null : 'code 1';
       },
-      restartDockerd: () => events.push('restart'),
+      restartDockerd: () => {
+        restarts += 1;
+        life += 1;
+        alive = true;
+        age = 0;
+      },
       probe: async () => {
-        events.push('probe');
-        return (calls += 1) >= 2;
+        if (!alive) return false;
+        age += 1;
+        const { diesAt = Infinity, upAt = Infinity } = lives[life] ?? {};
+        if (age >= diesAt) {
+          alive = false;
+          return false;
+        }
+        return age >= upAt;
       },
-      start: (cfg) => events.push(`start ${cfg}`),
+      start: (cfg) => started.push(cfg),
       log: (m) => logs.push(m),
-      sleep: async () => {},
+      readDockerdLog: () => 'failed to start containerd\n',
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+      timeoutMs: 120_000,
+      intervalMs: 1_000,
     });
-    out.restartsExitedDockerd = { events, logs };
+    return { started, logs, checks, restarts };
   }
 
-  // dockerd still running at /run: checked, not restarted.
-  {
-    const events = [];
-    const logs = [];
-    await decideAndStartRunner('JITCFG', {
-      hasDockerd: () => true,
-      dockerdStopped: () => {
-        events.push('check');
-        return null;
-      },
-      restartDockerd: () => events.push('restart'),
-      probe: async () => {
-        events.push('probe');
-        return true;
-      },
-      start: (cfg) => events.push(`start ${cfg}`),
-      log: (m) => logs.push(m),
-      sleep: async () => {},
-    });
-    out.leavesRunningDockerd = { events, logs };
-  }
+  // Running at /run, exits during the wait; the restart answers.
+  out.diesDuringWait = await withFakeDockerd([{ diesAt: 2 }, { upAt: 3 }]);
+  // Running throughout, answers on its 3rd probe.
+  out.staysRunning = await withFakeDockerd([{ upAt: 3 }]);
+  // Exits during the wait, and the restarted one exits too.
+  out.diesAgain = await withFakeDockerd([{ diesAt: 2 }, { diesAt: 2 }]);
 
   process.stdout.write(JSON.stringify(out));
 }
