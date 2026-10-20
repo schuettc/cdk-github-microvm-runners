@@ -94,7 +94,13 @@ API reference, in every language the package publishes to.
   does not require arguing for it, and a reader does not need the failure mode
   a design avoids.
 - Write plainly and in connected prose. Avoid coined vocabulary where an
-  ordinary word works, and refer to the platform as AWS Lambda MicroVMs.
+  ordinary word works, and refer to the platform as AWS Lambda MicroVMs
+  without describing what runs underneath it.
+- No pitch language: no benefit bullets, superlatives or "secure by default" framing. State what the thing is and does.
+- Genuine negative facts stay ("running MicroVMs cannot be tagged"). The rule is against teaching by negation, not against the word "no"; the README's "Why this exists" deliberately names the gap the library fills.
+- No roadmap or forward-looking commitments in user docs, and no status or "pre-v1" banners.
+- Prose beside a comparison table defines; it does not restate the table's cells. After moving a concept earlier, delete its restatements further down.
+- When defining a mechanism, say whether it is required or optional.
 
 ## Pull requests
 

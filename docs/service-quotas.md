@@ -80,6 +80,8 @@ torn down still counts until it's fully gone. The AWS default of 1024 GB covers
 that; on a throttled **8 GB** account a single `GB4` (≈16 GB actual) already
 exceeds the quota and monopolizes the runner set until it exits.
 
+`maxConcurrentVms` counts VMs in the `RUNNING` state, so a VM that has been launched but has not reached `RUNNING` holds account memory without counting toward the cap. During a burst the runner set can briefly run more than the configured number, which is part of what the headroom covers.
+
 With `maxConcurrentVms` set above what the memory quota covers, the quota is
 what binds: launches past it fail with the error above and serialize.
 
@@ -132,5 +134,8 @@ for code in L-CD1C0CC4 L-535CA9B6 L-91B95582; do
 done
 ```
 
-Compare `Applied` against the defaults in the table above. Anything below
-default is a candidate to raise.
+Compare `Applied` against the defaults in the table above.
+
+A new account starts below the published defaults, and AWS raises it automatically as the account uses MicroVMs. Service Quotas accepts only values at or above the default (1024 GB for **Max allocated memory**), so a request cannot express anything in between. A restore-to-default request on a new account goes to a support case and may be denied. Running real workloads is what raises the quota.
+
+A fresh request shows `PENDING` with `CaseId: null`, which means it has not been triaged yet, so re-poll its `Status` rather than reading the submit response.
