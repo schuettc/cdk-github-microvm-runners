@@ -1,7 +1,7 @@
 /**
  * Unit tests for the pure pieces of the in-VM agent (`src/image/assets/agent.mjs`):
  * `buildRunnerArgs`, the injected-clock readiness poll `waitForDockerReady`, and
- * the start/wait/timeout decision in `decideAndStartRunner`.
+ * the restart/start/wait/timeout decision in `decideAndStartRunner`.
  *
  * The agent is dependency-free ESM shipped verbatim into the image. jest runs as
  * CommonJS and can't `import` the `.mjs` without --experimental-vm-modules, so the
@@ -12,6 +12,13 @@
  */
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+
+interface FakeDockerdRun {
+  started: string[];
+  logs: string[];
+  checks: number;
+  restarts: number;
+}
 
 interface Scenarios {
   args: string[];
@@ -24,6 +31,9 @@ interface Scenarios {
   waitsThenStarts: { started: string[] };
   timesOut: { started: string[]; logs: string[] };
   timesOutUnreadableLog: { logs: string[] };
+  diesDuringWait: FakeDockerdRun;
+  staysRunning: FakeDockerdRun;
+  diesAgain: FakeDockerdRun;
 }
 
 let s: Scenarios;
@@ -105,6 +115,33 @@ describe('decideAndStartRunner', () => {
     expect(s.timesOutUnreadableLog.logs).toEqual([
       'dockerd not ready after 120s; not accepting a job',
       '/var/log/microvm-runner-dockerd.log could not be read: Error: ENOENT: no such file or directory',
+    ]);
+  });
+
+  it('restarts a dockerd that exits during the wait once, then starts the runner', () => {
+    // A warm VM's dockerd exits just after resume, after /run arrived (#55).
+    expect(s.diesDuringWait.restarts).toBe(1);
+    expect(s.diesDuringWait.started).toEqual(['JITCFG']);
+    expect(s.diesDuringWait.logs).toEqual([
+      'dockerd is not running (code 1); restarting',
+    ]);
+  });
+
+  it('leaves a running dockerd alone while waiting for it', () => {
+    expect(s.staysRunning.checks).toBe(2); // asked after each failed probe
+    expect(s.staysRunning.restarts).toBe(0);
+    expect(s.staysRunning.started).toEqual(['JITCFG']);
+    expect(s.staysRunning.logs).toEqual([]);
+  });
+
+  it('does not restart dockerd a second time, and refuses the job when the restarted one dies too', () => {
+    expect(s.diesAgain.restarts).toBe(1);
+    expect(s.diesAgain.started).toEqual([]);
+    expect(s.diesAgain.logs).toEqual([
+      'dockerd is not running (code 1); restarting',
+      'dockerd not ready after 120s; not accepting a job',
+      '--- last 1 lines of /var/log/microvm-runner-dockerd.log ---',
+      'failed to start containerd',
     ]);
   });
 });
