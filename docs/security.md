@@ -153,7 +153,8 @@ What that means in practice, on the default image:
   [Runner images](images.md) covers the options, and none of them require
   anything of the workflow.
 - **Containers work without any of that.** The VM's agent starts the Docker
-  daemon at boot, as root, before the job exists; job steps reach it through
+  daemon as root when the job's configuration arrives, before the runner
+  starts and so before any step runs; job steps reach it through
   the socket, which the `runner` user holds through the `docker` group.
   `no_new_privs` restricts what a step's own processes can become, not what
   the already-running daemon does on its behalf.

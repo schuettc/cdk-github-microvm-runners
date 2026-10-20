@@ -26,13 +26,15 @@ those, and how to supply a Dockerfile of your own instead.
 ## Containers in a job
 
 A job can build and run containers. The base image carries the Docker engine,
-and the VM's agent starts `dockerd` at boot, as root, before any job arrives.
-On a Docker-capable image the agent will not accept a job until `dockerd`
-actually answers: it starts the daemon at boot and then, when the job's
-configuration arrives, waits (up to 120 seconds) for a real `docker info` to
-succeed before starting the runner. So a job never lands on a VM whose
-`docker` commands would fail because the daemon had not finished starting —
-the race that a job arriving a second after the runner connected used to lose.
+and the VM's agent starts `dockerd`, as root, when the job's configuration
+arrives — not at boot. On a Docker-capable image the agent will not accept a
+job until `dockerd` actually answers: once it has started the daemon it waits
+(up to 120 seconds) for a real `docker info` to succeed before starting the
+runner, and logs how long that took. A job on a Docker image therefore waits
+for the daemon to start, on a cold VM and a warm one alike. So a job never
+lands on a VM whose `docker` commands would fail because the daemon had not
+finished starting — the race that a job arriving a second after the runner
+connected used to lose.
 If the daemon never answers within that window the runner is not started, the
 job stays queued, and the VM is reaped as a stuck launch rather than taking the
 job and failing it. An image with no `dockerd` is unaffected and starts the
@@ -57,7 +59,7 @@ a job:
   `docker build` when a build step fetches from the network. `docker pull`
   itself is unaffected — the daemon fetches from the host side.
 
-The daemon's boot log is written to `/var/log/microvm-runner-dockerd.log`,
+The daemon's log is written to `/var/log/microvm-runner-dockerd.log`,
 readable from any job step. When a `docker` command cannot reach the daemon,
 that file says why.
 
