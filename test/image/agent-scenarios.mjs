@@ -9,7 +9,8 @@ import {
   buildRunnerArgs,
   waitForDockerReady,
   decideAndStartRunner,
-  dockerInfoProbe,
+  commandProbe,
+  dockerdArgs,
   isMainModule,
 } from '../../src/image/assets/agent.mjs';
 import { spawnSync } from 'node:child_process';
@@ -82,8 +83,16 @@ async function run() {
     const started = [];
     let probes = 0;
     let dockerdStarts = 0;
+    let containerdStarts = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => false,
+      startContainerd: () => {
+        containerdStarts += 1;
+      },
+      containerdProbe: async () => {
+        probes += 1;
+        return true;
+      },
       startDockerd: () => {
         dockerdStarts += 1;
       },
@@ -94,7 +103,7 @@ async function run() {
       start: (cfg) => started.push(cfg),
       sleep: async () => {},
     });
-    out.noDockerd = { started, probes, dockerdStarts };
+    out.noDockerd = { started, probes, dockerdStarts, containerdStarts };
   }
 
   // dockerd answers after a wait: start.
@@ -104,6 +113,8 @@ async function run() {
     let calls = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      startContainerd: () => {},
+      containerdProbe: async () => true,
       startDockerd: () => {},
       probe: async () => (calls += 1) >= 2,
       start: (cfg) => started.push(cfg),
@@ -127,6 +138,8 @@ async function run() {
     const dockerdLog = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      startContainerd: () => {},
+      containerdProbe: async () => true,
       startDockerd: () => {},
       probe: async () => false,
       start: (cfg) => started.push(cfg),
@@ -148,6 +161,8 @@ async function run() {
     let clock = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      startContainerd: () => {},
+      containerdProbe: async () => true,
       startDockerd: () => {},
       probe: async () => false,
       start: () => {},
@@ -165,12 +180,17 @@ async function run() {
     out.timesOutUnreadableLog = { logs };
   }
 
-  // dockerd is started when the job arrives, before the first probe, and the
-  // runner once it answers.
+  // containerd is started when the job arrives and waited for, then dockerd,
+  // then the runner.
   {
     const calls = [];
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      startContainerd: () => calls.push('startContainerd'),
+      containerdProbe: async () => {
+        calls.push('containerdProbe');
+        return true;
+      },
       startDockerd: () => calls.push('startDockerd'),
       probe: async () => {
         calls.push('probe');
@@ -181,27 +201,115 @@ async function run() {
       sleep: async () => {},
       now: () => 0,
     });
-    out.startsDockerdAtJob = { calls };
+    out.startsInOrder = { calls };
   }
 
-  // How long dockerd took is logged before the runner starts.
+  // A slow containerd: dockerd is not started until containerd answers.
+  {
+    const calls = [];
+    let clock = 0;
+    let containerdCalls = 0;
+    await decideAndStartRunner('JITCFG', {
+      hasDockerd: () => true,
+      startContainerd: () => calls.push('startContainerd'),
+      containerdProbe: async () => {
+        calls.push('containerdProbe');
+        return (containerdCalls += 1) === 3;
+      },
+      startDockerd: () => calls.push('startDockerd'),
+      probe: async () => {
+        calls.push('probe');
+        return true;
+      },
+      start: (cfg) => calls.push(`start(${cfg})`),
+      log: () => {},
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+    });
+    out.dockerdAfterContainerd = { calls };
+  }
+
+  // containerd never answers: refuse, start neither dockerd nor the runner.
+  {
+    const calls = [];
+    const logs = [];
+    let clock = 0;
+    await decideAndStartRunner('JITCFG', {
+      hasDockerd: () => true,
+      startContainerd: () => calls.push('startContainerd'),
+      containerdProbe: async () => {
+        calls.push('containerdProbe');
+        return false;
+      },
+      startDockerd: () => calls.push('startDockerd'),
+      probe: async () => {
+        calls.push('probe');
+        return true;
+      },
+      start: (cfg) => calls.push(`start(${cfg})`),
+      log: (m) => logs.push(m),
+      readDockerdLog: () => 'containerd line\n',
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+    });
+    out.containerdNeverAnswers = { calls, logs };
+  }
+
+  // One 120 s budget for both waits: containerd answers at 100 s, so dockerd
+  // has 20 s left and the wait ends at 120 s with the refusal.
+  {
+    let clock = 0;
+    const budgets = [];
+    const logs = [];
+    let dockerdStartedAt = -1;
+    await decideAndStartRunner('JITCFG', {
+      hasDockerd: () => true,
+      startContainerd: () => {},
+      containerdProbe: async () => clock >= 100_000,
+      startDockerd: () => {
+        dockerdStartedAt = clock;
+      },
+      probe: async (ms) => {
+        budgets.push(ms);
+        return false;
+      },
+      start: () => logs.push('start'),
+      log: (m) => logs.push(m),
+      readDockerdLog: () => '',
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+    });
+    out.sharedBudget = { budgets, endedAt: clock, logs, dockerdStartedAt };
+  }
+
+  // How long containerd and dockerd took, from the job's arrival, is logged
+  // before the runner starts.
   {
     const events = [];
     let clock = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
+      startContainerd: () => {},
+      containerdProbe: async () => clock >= 8_000,
       startDockerd: () => {},
-      probe: async () => {
-        clock += 37_000;
-        return true;
-      },
+      probe: async () => clock >= 11_000,
       start: (cfg) => events.push(`start(${cfg})`),
       log: (m) => events.push(m),
-      sleep: async () => {},
+      sleep: async (ms) => {
+        clock += ms;
+      },
       now: () => clock,
     });
-    out.logsReadyTime = { events };
+    out.logsReadyTimes = { events };
   }
+
+  out.dockerdArgs = dockerdArgs();
 
   // Each probe gets the probe timeout, or the time left if that is less: the
   // first probe has the whole 120 s budget, the second 4 s.
@@ -234,7 +342,7 @@ async function run() {
       during = children();
     }, 100);
     const t0 = Date.now();
-    const result = await dockerInfoProbe({
+    const result = await commandProbe({
       timeoutMs: 200,
       command: 'sleep',
       args: ['5'],
