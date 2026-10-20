@@ -1,7 +1,8 @@
 /**
  * Unit tests for the pure pieces of the in-VM agent (`src/image/assets/agent.mjs`):
  * `buildRunnerArgs`, the injected-clock readiness poll `waitForDockerReady`, and
- * the restart/start/wait/timeout decision in `decideAndStartRunner`.
+ * the bounded `docker info` check `dockerInfoProbe`, and the start/wait/timeout
+ * decision in `decideAndStartRunner`.
  *
  * The agent is dependency-free ESM shipped verbatim into the image. jest runs as
  * CommonJS and can't `import` the `.mjs` without --experimental-vm-modules, so the
@@ -13,13 +14,6 @@
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 
-interface FakeDockerdRun {
-  started: string[];
-  logs: string[];
-  checks: number;
-  restarts: number;
-}
-
 interface Scenarios {
   args: string[];
   mainViaSymlink: boolean;
@@ -27,13 +21,19 @@ interface Scenarios {
   notMainWhenNoArgv: boolean;
   readyOnProbeSuccess: { ready: boolean; calls: number };
   timeout: { ready: boolean; calls: number };
-  noDockerd: { started: string[]; probes: number };
+  noDockerd: { started: string[]; probes: number; dockerdStarts: number };
   waitsThenStarts: { started: string[] };
   timesOut: { started: string[]; logs: string[] };
   timesOutUnreadableLog: { logs: string[] };
-  diesDuringWait: FakeDockerdRun;
-  staysRunning: FakeDockerdRun;
-  diesAgain: FakeDockerdRun;
+  startsDockerdAtJob: { calls: string[] };
+  logsReadyTime: { events: string[] };
+  probeBudgets: { budgets: number[] };
+  hungProbe: {
+    result: boolean;
+    elapsedMs: number;
+    during: string;
+    after: string;
+  };
 }
 
 let s: Scenarios;
@@ -85,12 +85,42 @@ describe('waitForDockerReady', () => {
     // interval per sleep, 120_000 / 1_000 = 120 probes, and not one more.
     expect(s.timeout.calls).toBe(120);
   });
+
+  it('gives each probe at most the probe timeout, and never more than the time left', () => {
+    // 120 s left: the probe timeout (10 s). Then 4 s left: 4 s.
+    expect(s.probeBudgets.budgets).toEqual([10000, 4000]);
+  });
+});
+
+describe('dockerInfoProbe', () => {
+  it('resolves false and kills the child when the check outlives its timeout', () => {
+    expect(s.hungProbe.during).not.toBe(''); // the child was running
+    expect(s.hungProbe.result).toBe(false);
+    expect(s.hungProbe.elapsedMs).toBeLessThan(2000);
+    expect(s.hungProbe.after).toBe(''); // and is gone
+  });
 });
 
 describe('decideAndStartRunner', () => {
-  it('starts the runner immediately, without probing, when the image has no dockerd', () => {
+  it('starts dockerd when the job arrives, before the first probe, then starts the runner once it answers', () => {
+    expect(s.startsDockerdAtJob.calls).toEqual([
+      'startDockerd',
+      'probe',
+      'start(JITCFG)',
+    ]);
+  });
+
+  it('starts neither dockerd nor a probe on an image without dockerd', () => {
     expect(s.noDockerd.started).toEqual(['JITCFG']);
+    expect(s.noDockerd.dockerdStarts).toBe(0);
     expect(s.noDockerd.probes).toBe(0);
+  });
+
+  it('logs how long dockerd took to answer', () => {
+    expect(s.logsReadyTime.events).toEqual([
+      'dockerd ready after 37.0s',
+      'start(JITCFG)',
+    ]);
   });
 
   it('waits then starts once dockerd answers', () => {
@@ -115,33 +145,6 @@ describe('decideAndStartRunner', () => {
     expect(s.timesOutUnreadableLog.logs).toEqual([
       'dockerd not ready after 120s; not accepting a job',
       '/var/log/microvm-runner-dockerd.log could not be read: Error: ENOENT: no such file or directory',
-    ]);
-  });
-
-  it('restarts a dockerd that exits during the wait once, then starts the runner', () => {
-    // A warm VM's dockerd exits just after resume, after /run arrived (#55).
-    expect(s.diesDuringWait.restarts).toBe(1);
-    expect(s.diesDuringWait.started).toEqual(['JITCFG']);
-    expect(s.diesDuringWait.logs).toEqual([
-      'dockerd is not running (code 1); restarting',
-    ]);
-  });
-
-  it('leaves a running dockerd alone while waiting for it', () => {
-    expect(s.staysRunning.checks).toBe(2); // asked after each failed probe
-    expect(s.staysRunning.restarts).toBe(0);
-    expect(s.staysRunning.started).toEqual(['JITCFG']);
-    expect(s.staysRunning.logs).toEqual([]);
-  });
-
-  it('does not restart dockerd a second time, and refuses the job when the restarted one dies too', () => {
-    expect(s.diesAgain.restarts).toBe(1);
-    expect(s.diesAgain.started).toEqual([]);
-    expect(s.diesAgain.logs).toEqual([
-      'dockerd is not running (code 1); restarting',
-      'dockerd not ready after 120s; not accepting a job',
-      '--- last 1 lines of /var/log/microvm-runner-dockerd.log ---',
-      'failed to start containerd',
     ]);
   });
 });
