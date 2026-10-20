@@ -37,17 +37,18 @@ export const DOCKER_READY_TIMEOUT_MS = 120_000;
 // Poll interval for the readiness probe — short so the runner starts promptly
 // once the daemon is up, without busy-spinning `docker info`.
 export const DOCKER_POLL_INTERVAL_MS = 1_000;
+// The most one `docker info` check may take. A `docker info` against a daemon
+// that holds the socket but never answers blocks instead of failing (seen on a
+// GB2 VM in August: "socket present, docker info blocked"), so without a bound
+// a single check could outlast DOCKER_READY_TIMEOUT_MS.
+export const DOCKER_PROBE_TIMEOUT_MS = 10_000;
 // Where dockerd's stdout/stderr go, and how much of it is echoed to the console
 // when the agent refuses a job because dockerd never answered.
 const DOCKERD_LOG = '/var/log/microvm-runner-dockerd.log';
 const DOCKERD_LOG_TAIL_LINES = 50;
 
 let runnerStarted = false;
-// The dockerd this agent spawned: null until it is started, then `running`
-// until its `exit` (or spawn `error`) event says how it ended. The child is
-// detached and unref'd, but the HTTP server keeps the event loop alive, so the
-// event is still delivered.
-let dockerd = null;
+let dockerStarted = false;
 
 /**
  * The `run.sh` argv the runner is started with (as arguments to `sudo -u
@@ -79,7 +80,9 @@ export function buildRunnerArgs(jitConfig) {
  * elapses on the injected `now` clock (timed out). Returns `true` as soon as a
  * probe succeeds, `false` on timeout — and makes NO further probe call once the
  * clock has reached the deadline, so the bound is a hard ceiling on the number
- * of probes as well as on wall-clock time.
+ * of probes as well as on wall-clock time. Each probe is passed how long it may
+ * take: DOCKER_PROBE_TIMEOUT_MS, or the time left before the deadline if that
+ * is less, so a check that hangs cannot carry the wait past the bound.
  *
  * `probe`, `now`, and `sleep` are injected so this is a pure control-flow
  * function testable with a fake clock — the real caller passes a `docker info`
@@ -94,7 +97,8 @@ export async function waitForDockerReady({
 }) {
   const deadline = now() + timeoutMs;
   while (now() < deadline) {
-    if (await probe()) return true;
+    if (await probe(Math.min(DOCKER_PROBE_TIMEOUT_MS, deadline - now())))
+      return true;
     await sleep(intervalMs);
   }
   return false;
@@ -117,13 +121,30 @@ function imageHasDockerd() {
  * The readiness check jobs actually depend on: a real `docker info` returning
  * success. The socket file merely existing is not enough — dockerd creates it
  * before it can serve requests. Resolves `true` on exit 0, `false` on any
- * other exit or spawn error.
+ * other exit or spawn error, and `false` once `timeoutMs` passes, killing the
+ * check with SIGKILL so a hung `docker info` is not left behind. Resolves once.
+ * `command` and `args` are injectable so a test can stand in a check that hangs.
  */
-function dockerInfoProbe() {
+export function dockerInfoProbe({
+  timeoutMs,
+  command = 'docker',
+  args = ['info'],
+}) {
   return new Promise((resolve) => {
-    const p = spawn('docker', ['info'], { stdio: 'ignore' });
-    p.on('error', () => resolve(false));
-    p.on('exit', (code) => resolve(code === 0));
+    let settled = false;
+    const settle = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const p = spawn(command, args, { stdio: 'ignore' });
+    const timer = setTimeout(() => {
+      p.kill('SIGKILL');
+      settle(false);
+    }, timeoutMs);
+    p.on('error', () => settle(false));
+    p.on('exit', (code) => settle(code === 0));
   });
 }
 
@@ -141,16 +162,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Output is logged to /var/log/microvm-runner-dockerd.log (NOT swallowed) so a failure
 // is diagnosable from inside a job, and when dockerd never answers and no job
 // runs, decideAndStartRunner prints the log's tail to the console instead.
-// Idempotent while the daemon it started is running; once that one has exited,
-// a call starts a new one (see decideAndStartRunner for why).
+// Called once per VM, when the job's configuration reaches /run; later calls
+// do nothing.
 function startDockerd() {
-  if (dockerd && dockerd.running) return;
-  const state = { running: true, exit: '' };
-  dockerd = state;
-  const ended = (exit) => {
-    state.running = false;
-    state.exit = exit;
-  };
+  if (dockerStarted) return;
+  dockerStarted = true;
   try {
     mkdirSync('/var/log', { recursive: true });
     const log = openSync(DOCKERD_LOG, 'a');
@@ -158,27 +174,11 @@ function startDockerd() {
       stdio: ['ignore', log, log],
       detached: true,
     });
-    d.on('error', (e) => {
-      console.log(`dockerd failed to spawn: ${e}`);
-      ended('failed to spawn');
-    });
-    d.on('exit', (code, signal) =>
-      ended(signal ? `signal ${signal}` : `code ${code}`),
-    );
+    d.on('error', (e) => console.log(`dockerd failed to spawn: ${e}`));
     d.unref();
   } catch (e) {
     console.log(`dockerd start error: ${e}`);
-    ended('failed to start');
   }
-}
-
-/**
- * Why the dockerd this agent started is not running ('code 1', 'signal
- * SIGKILL', 'not started', ...), or null while it is.
- */
-function dockerdNotRunning() {
-  if (!dockerd) return 'not started';
-  return dockerd.running ? null : dockerd.exit;
 }
 
 /** Spawn the GitHub Actions runner for `jitConfig`. */
@@ -205,38 +205,31 @@ function startRunner(jitConfig) {
  * onto a VM whose `docker` commands would fail. An image without dockerd
  * starts immediately, unchanged.
  *
- * dockerd is started at /ready, but that head start can be lost: a warm-pool
- * VM is suspended seconds after it boots, and a dockerd suspended mid-start
- * finds its containerd wait long past its deadline on resume and exits
- * ("failed to start containerd: timeout waiting for containerd to start",
- * issue #55). The platform sends /run as soon as the VM resumes, and dockerd
- * notices its deadline and exits a moment later, so a check made once at /run
- * can still see it running. The check is therefore part of the wait: on each
- * poll where `docker info` fails, a dockerd that is no longer running is
- * started again, with one line saying so; a running one is left alone. At
- * most once per job: after /run the VM is not suspended again, so a dockerd
- * that dies after its restart has a real fault and ends in the refusal and
- * log tail below rather than a restart loop. Nothing needs cleaning up first:
- * the dead dockerd removed its pid file, its containerd died with it, and a
- * new dockerd starts a fresh containerd.
+ * On a Docker-capable image dockerd is started here, when the job's
+ * configuration has arrived, and not earlier: /ready runs once at image build
+ * and every VM resumes from the snapshot taken after it, so a dockerd started
+ * before then is carried across that snapshot (and across a warm VM's suspend)
+ * half-started, and fails on resume ("failed to start containerd: timeout
+ * waiting for containerd to start", issue #55). A job on a Docker image
+ * therefore waits for the daemon to start, cold or warm; how long it took is
+ * logged. One start per job: no restart or retry.
  *
- * The daemon detection, dockerd status and (re)start, readiness probe, runner
- * start, log sink, dockerd log reader, and clock are injectable (defaulting to
- * the real ones) so the whole decision — start now / restart dockerd, wait then
- * start / time out and don't start — is unit-testable without a VM.
+ * The daemon detection, dockerd start, readiness probe, runner start, log
+ * sink, dockerd log reader, and clock are injectable (defaulting to the real
+ * ones) so the whole decision — start now / start dockerd, wait then start /
+ * time out and don't start — is unit-testable without a VM.
  */
 export async function decideAndStartRunner(
   jitConfig,
   {
     hasDockerd = imageHasDockerd,
-    dockerdStopped = dockerdNotRunning,
-    restartDockerd = startDockerd,
-    probe = dockerInfoProbe,
+    startDockerd: startDockerdFn = startDockerd,
+    probe = (timeoutMs) => dockerInfoProbe({ timeoutMs }),
     start = startRunner,
     log = (m) => console.log(m),
     readDockerdLog = () => readFileSync(DOCKERD_LOG, 'utf8'),
     sleep: sleepFn = sleep,
-    now,
+    now = () => Date.now(),
     timeoutMs,
     intervalMs,
   } = {},
@@ -245,21 +238,10 @@ export async function decideAndStartRunner(
     start(jitConfig);
     return;
   }
-  let restarted = false;
-  const probeOrRestart = async () => {
-    if (await probe()) return true;
-    if (!restarted) {
-      const stopped = dockerdStopped();
-      if (stopped) {
-        restarted = true;
-        log(`dockerd is not running (${stopped}); restarting`);
-        restartDockerd();
-      }
-    }
-    return false;
-  };
+  const startedAt = now();
+  startDockerdFn();
   const ready = await waitForDockerReady({
-    probe: probeOrRestart,
+    probe,
     sleep: sleepFn,
     now,
     timeoutMs,
@@ -272,6 +254,7 @@ export async function decideAndStartRunner(
     logDockerdTail(readDockerdLog, log);
     return;
   }
+  log(`dockerd ready after ${((now() - startedAt) / 1000).toFixed(1)}s`);
   start(jitConfig);
 }
 
@@ -303,19 +286,11 @@ function handleRequest(req, res) {
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     if (req.url === READY_PATH) {
-      // Start dockerd at BOOT, not at /run, to CLOSE the daemon-not-ready race
-      // rather than merely narrow it. dockerd + the vfs storage driver are slow
-      // and variable to initialize in a MicroVM: starting it here, at the ready
-      // handshake, gives it the whole boot→job-assignment window to warm up.
-      // But warm-up time is not guaranteed to beat job assignment — a job that
-      // landed 1 s after the runner connected found no daemon (consumer canary
-      // run recreational-spreadsheeting/ci-runners 36222878239; an earlier
-      // narrowing on 2026-07-19 left the window open). So booting the daemon
-      // early is only half the fix: /run below still waits for `docker info` to
-      // actually answer before starting the runner, and while it waits starts
-      // dockerd again if a suspend killed it mid-start. Idempotent — safe if /ready is
-      // called more than once.
-      startDockerd();
+      // Answer and start nothing. /ready runs once, at image build, and every
+      // VM resumes from the snapshot taken right after it, so a dockerd
+      // started here would be carried across that snapshot (and across a warm
+      // VM's suspend) half-started, and fail on resume (#55). dockerd starts
+      // when the job's configuration reaches /run (decideAndStartRunner).
       res.writeHead(200);
       res.end();
       return;
@@ -349,8 +324,9 @@ function handleRequest(req, res) {
       runnerStarted = true;
       // Answer the /run hook FIRST. Its timeout (runTimeoutSeconds, ≤ 60 s —
       // see image-pipeline.ts) is far shorter than the dockerd-readiness bound,
-      // so we ack now and do the bounded wait out of band; the platform's hook
-      // timeout can never kill the VM while we wait for the daemon.
+      // so we ack now and start dockerd and do the bounded wait out of band;
+      // the platform's hook timeout can never kill the VM while we wait for
+      // the daemon.
       res.writeHead(200);
       res.end();
       // Fire-and-forget by design (the /run hook is already acked), but a

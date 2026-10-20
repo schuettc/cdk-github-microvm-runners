@@ -9,8 +9,10 @@ import {
   buildRunnerArgs,
   waitForDockerReady,
   decideAndStartRunner,
+  dockerInfoProbe,
   isMainModule,
 } from '../../src/image/assets/agent.mjs';
+import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { realpathSync, symlinkSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -75,12 +77,16 @@ async function run() {
     out.timeout = { ready, calls };
   }
 
-  // No dockerd: start immediately, never probe.
+  // No dockerd: start immediately; never start dockerd or probe.
   {
     const started = [];
     let probes = 0;
+    let dockerdStarts = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => false,
+      startDockerd: () => {
+        dockerdStarts += 1;
+      },
       probe: async () => {
         probes += 1;
         return true;
@@ -88,7 +94,7 @@ async function run() {
       start: (cfg) => started.push(cfg),
       sleep: async () => {},
     });
-    out.noDockerd = { started, probes };
+    out.noDockerd = { started, probes, dockerdStarts };
   }
 
   // dockerd answers after a wait: start.
@@ -98,9 +104,10 @@ async function run() {
     let calls = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
-      dockerdStopped: () => null,
+      startDockerd: () => {},
       probe: async () => (calls += 1) >= 2,
       start: (cfg) => started.push(cfg),
+      log: () => {},
       sleep: async (ms) => {
         clock += ms;
       },
@@ -120,7 +127,7 @@ async function run() {
     const dockerdLog = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
-      dockerdStopped: () => null,
+      startDockerd: () => {},
       probe: async () => false,
       start: (cfg) => started.push(cfg),
       log: (m) => logs.push(m),
@@ -141,7 +148,7 @@ async function run() {
     let clock = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
-      dockerdStopped: () => null,
+      startDockerd: () => {},
       probe: async () => false,
       start: () => {},
       log: (m) => logs.push(m),
@@ -158,61 +165,85 @@ async function run() {
     out.timesOutUnreadableLog = { logs };
   }
 
-  // A fake dockerd for the restart scenarios. Each entry of `lives` is one run
-  // of the daemon (the first is the one started at /ready, each later one a
-  // restart): `docker info` answers from its `upAt`-th probe, and on its
-  // `diesAt`-th probe it has exited (code 1) instead, as a warm VM's dockerd
-  // does a moment after resume.
-  async function withFakeDockerd(lives) {
-    const logs = [];
-    const started = [];
-    let life = 0;
-    let alive = true;
-    let age = 0;
-    let checks = 0;
-    let restarts = 0;
+  // dockerd is started when the job arrives, before the first probe, and the
+  // runner once it answers.
+  {
+    const calls = [];
+    await decideAndStartRunner('JITCFG', {
+      hasDockerd: () => true,
+      startDockerd: () => calls.push('startDockerd'),
+      probe: async () => {
+        calls.push('probe');
+        return true;
+      },
+      start: (cfg) => calls.push(`start(${cfg})`),
+      log: () => {},
+      sleep: async () => {},
+      now: () => 0,
+    });
+    out.startsDockerdAtJob = { calls };
+  }
+
+  // How long dockerd took is logged before the runner starts.
+  {
+    const events = [];
     let clock = 0;
     await decideAndStartRunner('JITCFG', {
       hasDockerd: () => true,
-      dockerdStopped: () => {
-        checks += 1;
-        return alive ? null : 'code 1';
-      },
-      restartDockerd: () => {
-        restarts += 1;
-        life += 1;
-        alive = true;
-        age = 0;
-      },
+      startDockerd: () => {},
       probe: async () => {
-        if (!alive) return false;
-        age += 1;
-        const { diesAt = Infinity, upAt = Infinity } = lives[life] ?? {};
-        if (age >= diesAt) {
-          alive = false;
-          return false;
-        }
-        return age >= upAt;
+        clock += 37_000;
+        return true;
       },
-      start: (cfg) => started.push(cfg),
-      log: (m) => logs.push(m),
-      readDockerdLog: () => 'failed to start containerd\n',
+      start: (cfg) => events.push(`start(${cfg})`),
+      log: (m) => events.push(m),
+      sleep: async () => {},
+      now: () => clock,
+    });
+    out.logsReadyTime = { events };
+  }
+
+  // Each probe gets the probe timeout, or the time left if that is less: the
+  // first probe has the whole 120 s budget, the second 4 s.
+  {
+    let clock = 0;
+    const budgets = [];
+    await waitForDockerReady({
+      probe: async (ms) => {
+        budgets.push(ms);
+        return false;
+      },
       sleep: async (ms) => {
         clock += ms;
       },
       now: () => clock,
       timeoutMs: 120_000,
-      intervalMs: 1_000,
+      intervalMs: 116_000,
     });
-    return { started, logs, checks, restarts };
+    out.probeBudgets = { budgets };
   }
 
-  // Running at /run, exits during the wait; the restart answers.
-  out.diesDuringWait = await withFakeDockerd([{ diesAt: 2 }, { upAt: 3 }]);
-  // Running throughout, answers on its 3rd probe.
-  out.staysRunning = await withFakeDockerd([{ upAt: 3 }]);
-  // Exits during the wait, and the restarted one exits too.
-  out.diesAgain = await withFakeDockerd([{ diesAt: 2 }, { diesAt: 2 }]);
+  // A `docker info` that hangs is cut off at its timeout and its child killed.
+  {
+    const children = () =>
+      spawnSync('pgrep', ['-P', String(process.pid), 'sleep'], {
+        encoding: 'utf8',
+      }).stdout.trim();
+    let during = '';
+    const peek = setTimeout(() => {
+      during = children();
+    }, 100);
+    const t0 = Date.now();
+    const result = await dockerInfoProbe({
+      timeoutMs: 200,
+      command: 'sleep',
+      args: ['5'],
+    });
+    const elapsedMs = Date.now() - t0;
+    clearTimeout(peek);
+    await new Promise((r) => setTimeout(r, 200));
+    out.hungProbe = { result, elapsedMs, during, after: children() };
+  }
 
   process.stdout.write(JSON.stringify(out));
 }
