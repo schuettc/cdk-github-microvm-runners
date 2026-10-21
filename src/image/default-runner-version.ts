@@ -9,4 +9,4 @@
  * so this pin is bumped as releases ship. See "Keeping the runner current" in
  * `docs/images.md`.
  */
-export const DEFAULT_RUNNER_VERSION = '2.337.0';
+export const DEFAULT_RUNNER_VERSION = '2.338.0';
