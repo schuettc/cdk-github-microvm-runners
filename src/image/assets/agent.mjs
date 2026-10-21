@@ -128,8 +128,7 @@ function imageHasDockerd() {
  * since dockerd creates it before it can serve requests). Resolves `true` on
  * exit 0, `false` on any other exit or spawn error, and `false` once
  * `timeoutMs` passes, killing the check with SIGKILL so a hung check is not
- * left behind. Resolves once. The containerd wait uses it with
- * `ctr --address <socket> version`; a test stands in a check that hangs.
+ * left behind. Resolves once. A test stands in a check that hangs.
  */
 export function commandProbe({
   timeoutMs,
@@ -180,7 +179,8 @@ function spawnDaemon(command, args) {
 // dockerd's own supervisor, which gives it a fixed 15 s to answer and then
 // exits with "failed to start containerd: timeout waiting for containerd to
 // start"; loading the containerd binary on a fresh VM has taken up to about
-// 11 s, so that limit was being missed (#55). Its output goes to the same log
+// 11 s, so that limit was being missed (#55). dockerd is started alongside it
+// and waits for its socket (see decideAndStartRunner). Its output goes to the same log
 // as dockerd's, so a refusal's tail shows both. Called once per VM, when the
 // job's configuration reaches /run; later calls do nothing.
 function startContainerd() {
@@ -199,9 +199,9 @@ function startContainerd() {
  *   --iptables=false       dockerd's iptables NAT setup fails without the
  *                          host netfilter modules; disabling it lets builds
  *                          and host-network runs work.
- * And --containerd points it at the containerd the agent already started and
- * waited for, so dockerd skips starting its own (and that 15 s limit) and only
- * dials the socket — the arrangement AL2023's docker.service uses (#55).
+ * And --containerd points it at the containerd the agent starts alongside it,
+ * so dockerd skips starting its own (and that 15 s limit) and only dials the
+ * socket — the arrangement AL2023's docker.service uses (#55).
  */
 export function dockerdArgs() {
   return [
@@ -211,7 +211,7 @@ export function dockerdArgs() {
   ];
 }
 
-// Start the Docker daemon with dockerdArgs(), after containerd answers.
+// Start the Docker daemon with dockerdArgs(), right after containerd.
 // Output is logged to /var/log/microvm-runner-dockerd.log (NOT swallowed) so a failure
 // is diagnosable from inside a job, and when dockerd never answers and no job
 // runs, decideAndStartRunner prints the log's tail to the console instead.
@@ -247,20 +247,24 @@ function startRunner(jitConfig) {
  * onto a VM whose `docker` commands would fail. An image without dockerd
  * starts immediately, unchanged.
  *
- * On a Docker-capable image containerd and then dockerd are started here,
- * when the job's configuration has arrived, and not earlier: /ready runs once
- * at image build and every VM resumes from the snapshot taken after it, so a
+ * On a Docker-capable image containerd and dockerd are started here, when
+ * the job's configuration has arrived, and not earlier: /ready runs once at
+ * image build and every VM resumes from the snapshot taken after it, so a
  * daemon started before then is carried across that snapshot (and across a
- * warm VM's suspend) half-started. containerd comes first, and dockerd only
- * once `ctr version` answers: dockerd's own containerd start gives up after a
- * fixed 15 s, which a slow first program load exceeds ("failed to start
- * containerd: timeout waiting for containerd to start", issue #55); this is
- * the order AL2023's own containerd.service and docker.service use. Both waits
- * share one DOCKER_READY_TIMEOUT_MS budget from the job's arrival, and either
- * running out ends in the same refusal. How long each took is logged. One
- * start of each per job: no restart or retry.
+ * warm VM's suspend) half-started. Both are started at once, containerd first
+ * so its socket appears as early as possible, and their slow first loads from
+ * disk overlap instead of adding up (#55). dockerd need not wait for
+ * containerd: with --containerd it does not start its own, so dockerd's fixed
+ * 15 s managed-containerd limit ("failed to start containerd: timeout waiting
+ * for containerd to start") does not apply, and it dials the socket with
+ * containerd.WithTimeout(60*time.Second) and grpc.WithBlock() (moby v25.0.16
+ * daemon/daemon.go:950-984), whose dialer retries every 10 ms while the
+ * socket does not exist yet (containerd v1.7.12 pkg/dialer/dialer.go,
+ * timeoutDialer and isNoent). Then one wait, on `docker info`, bounded at
+ * DOCKER_READY_TIMEOUT_MS from the job's arrival, and how long it took is
+ * logged. One start of each per job: no restart or retry.
  *
- * The daemon detection, daemon starts, readiness probes, runner start, log
+ * The daemon detection, daemon starts, readiness probe, runner start, log
  * sink, daemon log reader, and clock are injectable (defaulting to the real
  * ones) so the whole decision — start now / start the daemons, wait then start
  * / time out and don't start — is unit-testable without a VM.
@@ -270,12 +274,6 @@ export async function decideAndStartRunner(
   {
     hasDockerd = imageHasDockerd,
     startContainerd: startContainerdFn = startContainerd,
-    containerdProbe = (timeoutMs) =>
-      commandProbe({
-        timeoutMs,
-        command: 'ctr',
-        args: ['--address', CONTAINERD_SOCKET, 'version'],
-      }),
     startDockerd: startDockerdFn = startDockerd,
     probe = (timeoutMs) => commandProbe({ timeoutMs }),
     start = startRunner,
@@ -292,30 +290,23 @@ export async function decideAndStartRunner(
     return;
   }
   const startedAt = now();
-  const deadline = startedAt + timeoutMs;
-  const waitFor = (readyProbe) =>
-    waitForDockerReady({
-      probe: readyProbe,
-      sleep: sleepFn,
-      now,
-      timeoutMs: deadline - now(),
-      intervalMs,
-    });
-  const refuse = () => {
+  startContainerdFn();
+  startDockerdFn();
+  const ready = await waitForDockerReady({
+    probe,
+    sleep: sleepFn,
+    now,
+    timeoutMs,
+    intervalMs,
+  });
+  if (!ready) {
     log(
       `dockerd not ready after ${DOCKER_READY_TIMEOUT_MS / 1000}s; not accepting a job`,
     );
     logDockerdTail(readDockerdLog, log);
-  };
-  const took = () => ((now() - startedAt) / 1000).toFixed(1);
-
-  startContainerdFn();
-  if (!(await waitFor(containerdProbe))) return refuse();
-  log(`containerd ready after ${took()}s`);
-
-  startDockerdFn();
-  if (!(await waitFor(probe))) return refuse();
-  log(`dockerd ready after ${took()}s`);
+    return;
+  }
+  log(`dockerd ready after ${((now() - startedAt) / 1000).toFixed(1)}s`);
   start(jitConfig);
 }
 
