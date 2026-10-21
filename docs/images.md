@@ -27,12 +27,12 @@ those, and how to supply a Dockerfile of your own instead.
 
 A job can build and run containers. The base image carries the Docker engine,
 and the VM's agent starts it, as root, when the job's configuration arrives —
-not at boot. It starts `containerd` first and waits for it to answer, then
-starts `dockerd` pointed at that `containerd`, the same order the
-distribution's own `containerd` and `docker` services use. On a Docker-capable
-image the agent will not accept a job until `dockerd` actually answers: it
-waits up to 120 seconds in total, for both daemons, for a real `docker info`
-to succeed before starting the runner, and logs how long each daemon took. A job on a Docker image therefore waits
+not at boot. It starts `containerd` and, at the same moment, `dockerd` pointed
+at that `containerd`, so the two daemons' start-up overlaps; `dockerd` waits
+for `containerd`'s socket to appear. On a Docker-capable image the agent will
+not accept a job until `dockerd` actually answers: it waits up to 120 seconds
+for a real `docker info` to succeed before starting the runner, and logs how
+long `dockerd` took. A job on a Docker image therefore waits
 for the daemon to start, on a cold VM and a warm one alike. So a job never
 lands on a VM whose `docker` commands would fail because the daemon had not
 finished starting — the race that a job arriving a second after the runner

@@ -30,16 +30,9 @@ interface Scenarios {
   waitsThenStarts: { started: string[] };
   timesOut: { started: string[]; logs: string[] };
   timesOutUnreadableLog: { logs: string[] };
-  startsInOrder: { calls: string[] };
-  dockerdAfterContainerd: { calls: string[] };
-  containerdNeverAnswers: { calls: string[]; logs: string[] };
-  sharedBudget: {
-    budgets: number[];
-    endedAt: number;
-    logs: string[];
-    dockerdStartedAt: number;
-  };
-  logsReadyTimes: { events: string[] };
+  startsTogether: { calls: string[] };
+  neverAnswers: { calls: string[]; logs: string[]; endedAt: number };
+  logsReadyTime: { events: string[] };
   dockerdArgs: string[];
   probeBudgets: { budgets: number[] };
   hungProbe: {
@@ -116,48 +109,24 @@ describe('commandProbe', () => {
 });
 
 describe('decideAndStartRunner', () => {
-  it('starts containerd, waits for it, then starts dockerd, waits for it, then the runner', () => {
-    expect(s.startsInOrder.calls).toEqual([
+  it('starts containerd then dockerd before the first probe, then the runner once docker answers', () => {
+    expect(s.startsTogether.calls).toEqual([
       'startContainerd',
-      'containerdProbe',
       'startDockerd',
       'probe',
       'start(JITCFG)',
     ]);
   });
 
-  it('starts dockerd only after containerd answers', () => {
-    // containerd failed twice, then answered: dockerd comes after the third probe.
-    expect(s.dockerdAfterContainerd.calls).toEqual([
-      'startContainerd',
-      'containerdProbe',
-      'containerdProbe',
-      'containerdProbe',
-      'startDockerd',
-      'probe',
-      'start(JITCFG)',
-    ]);
-  });
-
-  it('refuses the job without starting dockerd when containerd never answers', () => {
-    expect(s.containerdNeverAnswers.calls).not.toContain('startDockerd');
-    expect(s.containerdNeverAnswers.calls).not.toContain('start(JITCFG)');
-    expect(s.containerdNeverAnswers.logs).toEqual([
+  it('refuses the job when docker never answers within 120 s', () => {
+    expect(s.neverAnswers.calls).toContain('startContainerd');
+    expect(s.neverAnswers.calls).toContain('startDockerd');
+    expect(s.neverAnswers.calls).not.toContain('start(JITCFG)');
+    expect(s.neverAnswers.logs.slice(0, 2)).toEqual([
       'dockerd not ready after 120s; not accepting a job',
       '--- last 1 lines of /var/log/microvm-runner-dockerd.log ---',
-      'containerd line',
     ]);
-  });
-
-  it('containerd and dockerd share one 120 s budget', () => {
-    expect(s.sharedBudget.dockerdStartedAt).toBe(100000);
-    expect(s.sharedBudget.budgets[0]).toBeLessThanOrEqual(10000);
-    expect(s.sharedBudget.endedAt).toBeLessThanOrEqual(120000);
-    expect(s.sharedBudget.logs.slice(0, 2)).toEqual([
-      'containerd ready after 100.0s',
-      'dockerd not ready after 120s; not accepting a job',
-    ]);
-    expect(s.sharedBudget.logs).not.toContain('start');
+    expect(s.neverAnswers.endedAt).toBeLessThanOrEqual(121000);
   });
 
   it('starts nothing and probes nothing on an image without dockerd', () => {
@@ -167,12 +136,15 @@ describe('decideAndStartRunner', () => {
     expect(s.noDockerd.probes).toBe(0);
   });
 
-  it('logs how long containerd and dockerd took', () => {
-    expect(s.logsReadyTimes.events).toEqual([
-      'containerd ready after 8.0s',
-      'dockerd ready after 11.0s',
-      'start(JITCFG)',
-    ]);
+  it('logs how long dockerd took', () => {
+    const events = s.logsReadyTime.events;
+    expect(events).toContain('dockerd ready after 11.0s');
+    expect(events.indexOf('dockerd ready after 11.0s')).toBeLessThan(
+      events.indexOf('start(JITCFG)'),
+    );
+    expect(events.some((e) => e.startsWith('containerd ready after'))).toBe(
+      false,
+    );
   });
 
   it('waits then starts once dockerd answers', () => {
@@ -181,15 +153,13 @@ describe('decideAndStartRunner', () => {
 
   it('when dockerd times out, does not start the runner and logs the refusal then the tail of the dockerd log', () => {
     expect(s.timesOut.started).toEqual([]); // no runner started
-    // containerd answered at once; then the refusal line, which operators grep
-    // for, unchanged.
-    expect(s.timesOut.logs.slice(0, 2)).toEqual([
-      'containerd ready after 0.0s',
+    // The refusal line, which operators grep for, unchanged.
+    expect(s.timesOut.logs[0]).toBe(
       'dockerd not ready after 120s; not accepting a job',
-    ]);
+    );
     // Then the last 50 of the log's 60 lines, under a header naming the file.
     const tail = Array.from({ length: 50 }, (_, i) => `line ${i + 11}`);
-    expect(s.timesOut.logs.slice(2)).toEqual([
+    expect(s.timesOut.logs.slice(1)).toEqual([
       '--- last 50 lines of /var/log/microvm-runner-dockerd.log ---',
       ...tail,
     ]);
@@ -197,7 +167,6 @@ describe('decideAndStartRunner', () => {
 
   it('when dockerd times out and its log cannot be read, logs one line saying so with the error', () => {
     expect(s.timesOutUnreadableLog.logs).toEqual([
-      'containerd ready after 0.0s',
       'dockerd not ready after 120s; not accepting a job',
       '/var/log/microvm-runner-dockerd.log could not be read: Error: ENOENT: no such file or directory',
     ]);
