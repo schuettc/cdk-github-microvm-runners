@@ -251,7 +251,7 @@ const IMAGE_VERSION_ACTIONS = [
 export interface GithubMicrovmRunnersProps {
   /** How the runner set authenticates to GitHub, as an App or with a personal access token. This also carries the webhook secret. */
   readonly github: GithubAuth;
-  /** Which GitHub scope, an organization or a list of repositories, registered runners are visible to. */
+  /** Which GitHub scope, one organization, several organizations, or a list of repositories, registered runners are visible to. */
   readonly scope: RunnerScope;
   /**
    * Customer-managed KMS key for this runner set's data at rest: the DynamoDB
@@ -1213,6 +1213,7 @@ export class GithubMicrovmRunners extends Construct {
   private readonly classRegistry: InternalRunnerClass[] = [];
   /** Captured from props/defaults for `addRunnerClass` to build each class's `ImagePipeline` after construction. */
   private readonly runnerSetId: string;
+  private readonly scopeKind: RunnerScopeKind;
   private readonly network: RunnerNetwork;
   private readonly imageLogs?: ImageLogs;
   /** Backing field for the {@link warmPoolFunction} getter — also doubles as the "warm-pool infra already created" guard in {@link createWarmPoolInfra}. */
@@ -1443,6 +1444,7 @@ export class GithubMicrovmRunners extends Construct {
 
     // --- Shared env fragments --------------------------------------------
     const scopeJson = props.scope.toJson();
+    this.scopeKind = props.scope.kind;
     // package.json sits one directory above the compiled `lib/`, and one above
     // `src/` when the tests run from source — the same relative position either
     // way, and the same `__dirname` trick as HANDLERS_DIR above. Minor-pinned
@@ -1452,10 +1454,14 @@ export class GithubMicrovmRunners extends Construct {
       readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
     ) as { name: string; version: string };
     const [major, minor] = pkg.version.split('.');
+    // A multi-org set is set up against its first org; the App is then
+    // installed on the others (docs/onboarding.md).
     const setupTarget =
       props.scope.kind === RunnerScopeKind.ORG
         ? `--org ${props.scope.organization}`
-        : `--account ${props.scope.repositories![0].split('/')[0]}`;
+        : props.scope.kind === RunnerScopeKind.ORGS
+          ? `--org ${props.scope.organizations![0]}`
+          : `--account ${props.scope.repositories![0].split('/')[0]}`;
     this.setupCommand = [
       `npx ${pkg.name}@${major}.${minor} setup`,
       setupTarget,
@@ -1792,7 +1798,8 @@ export class GithubMicrovmRunners extends Construct {
     // refuses to synthesize (see GithubMicrovmRunnersMetrics.queuedJobAgeAlarm).
     const queuedJobScanUnavailable =
       props.github.kind === GithubAuthKind.PAT &&
-      props.scope.kind === RunnerScopeKind.ORG;
+      (props.scope.kind === RunnerScopeKind.ORG ||
+        props.scope.kind === RunnerScopeKind.ORGS);
     if (emitMetrics && queuedJobScanUnavailable) {
       Annotations.of(this).addWarning(
         'GithubMicrovmRunners: emitMetrics is on with PAT auth + org scope, so the janitor cannot ' +
@@ -1844,6 +1851,12 @@ export class GithubMicrovmRunners extends Construct {
         `runner class "${label}": warmPoolSize`,
         props.warmPoolSize,
       );
+      if (this.scopeKind === RunnerScopeKind.ORGS) {
+        throw new Error(
+          `GithubMicrovmRunners: runner class "${label}": warmPoolSize is not supported with RunnerScope.orgs(). ` +
+            'Drop warmPoolSize from the class, or deploy one runner set per organization with RunnerScope.org().',
+        );
+      }
     }
     if (props.idlePolicy !== undefined) {
       // Catch a zero/negative idle Duration at synth. Otherwise it flows

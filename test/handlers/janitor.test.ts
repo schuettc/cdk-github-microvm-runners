@@ -1302,6 +1302,50 @@ describe('repos scope fan-out', () => {
   });
 });
 
+describe('orgs scope fan-out', () => {
+  it('reconciles runners in every listed org, each against its own org target', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'Globex'] }),
+    });
+    setRunnerSetVms([{ microvmId: 'mvm-1' }, { microvmId: 'mvm-2' }]);
+    setTableRows([
+      normalRow({
+        runnerName: 'microvm-runner-x-aaaa1111',
+        microvmId: 'mvm-1',
+        repo: 'acme/widgets',
+      }),
+      normalRow({
+        runnerName: 'microvm-runner-x-bbbb2222',
+        microvmId: 'mvm-2',
+        repo: 'globex/gadgets',
+      }),
+    ]);
+    listRunnersMock.mockImplementation(async (target) =>
+      'org' in target && target.org === 'acme'
+        ? [
+            githubRunner({
+              id: 1,
+              name: 'microvm-runner-x-aaaa1111',
+              busy: true,
+            }),
+          ]
+        : [
+            githubRunner({
+              id: 2,
+              name: 'microvm-runner-x-bbbb2222',
+              busy: true,
+            }),
+          ],
+    );
+
+    await handler();
+
+    expect(listRunnersMock).toHaveBeenCalledWith({ org: 'acme' });
+    expect(listRunnersMock).toHaveBeenCalledWith({ org: 'Globex' });
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+});
+
 describe('image version pruning', () => {
   function versionSummary(overrides: {
     imageVersion: string;
@@ -2815,6 +2859,44 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     const scannedRepos = listWorkflowRunsMock.mock.calls.map((c) => c[2]);
     expect(new Set(scannedRepos)).toEqual(new Set(['widgets', 'gadgets']));
     // Two repos each with one queued microvm job.
+    expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(2);
+    logSpy.mockRestore();
+  });
+
+  it('orgs scope scans the installation repos of every listed org', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'globex'] }),
+    });
+    listInstallationReposMock.mockImplementation(async (target) =>
+      'org' in target && target.org === 'acme'
+        ? [{ owner: 'acme', repo: 'widgets' }]
+        : [{ owner: 'globex', repo: 'gadgets' }],
+    );
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(120),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(listInstallationReposMock).toHaveBeenCalledWith({ org: 'acme' });
+    expect(listInstallationReposMock).toHaveBeenCalledWith({ org: 'globex' });
+    const scanned = listWorkflowRunsMock.mock.calls.map((c) => [c[0], c[2]]);
+    expect(scanned).toEqual(
+      expect.arrayContaining([
+        [{ org: 'acme' }, 'widgets'],
+        [{ org: 'globex' }, 'gadgets'],
+      ]),
+    );
     expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(2);
     logSpy.mockRestore();
   });

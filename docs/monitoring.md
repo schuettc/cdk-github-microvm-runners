@@ -218,7 +218,7 @@ in the period and cannot page. A `period` you pass that is shorter than
 `janitorInterval` is rejected at synth: it would guarantee empty periods and a
 permanent false ALARM.
 
-Under **PAT auth with org scope** this alarm is unavailable and throws at synth.
+Under **PAT auth with org scope** (`RunnerScope.org` or `RunnerScope.orgs`) this alarm is unavailable and throws at synth.
 The queued-job scan enumerates the org's repositories through the App
 installation-repositories endpoint, which a personal access token cannot call
 (GitHub returns 403), so the janitor skips the scan and never emits

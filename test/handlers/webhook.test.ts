@@ -550,6 +550,20 @@ describe('scope enforcement (the repository a delivery names must be one this ru
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
   });
 
+  it('orgs scope: a repository under any listed org is queued, one under another owner is ignored', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'globex'] }),
+    });
+
+    const inScope = await handler(signedQueuedEvent('Globex/gadgets') as never);
+    expect(JSON.parse(inScope.body)).toEqual({ queued: true });
+    const outOfScope = await handler(
+      signedQueuedEvent('other-org/widgets') as never,
+    );
+    expect(JSON.parse(outOfScope.body)).toEqual({ ignored: true });
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
+  });
+
   it('scope is checked BEFORE labels, so an out-of-scope repo is ignored even when its labels match', async () => {
     // Ordering matters for what an attacker learns: checking labels first
     // would let an out-of-scope repository probe which labels this runner set

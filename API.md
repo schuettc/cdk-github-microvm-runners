@@ -742,7 +742,7 @@ const githubMicrovmRunnersProps: GithubMicrovmRunnersProps = { ... }
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersProps.property.github">github</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAuth">GithubAuth</a></code> | How the runner set authenticates to GitHub, as an App or with a personal access token. |
-| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersProps.property.scope">scope</a></code> | <code><a href="#cdk-github-microvm-runners.RunnerScope">RunnerScope</a></code> | Which GitHub scope, an organization or a list of repositories, registered runners are visible to. |
+| <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersProps.property.scope">scope</a></code> | <code><a href="#cdk-github-microvm-runners.RunnerScope">RunnerScope</a></code> | Which GitHub scope, one organization, several organizations, or a list of repositories, registered runners are visible to. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersProps.property.additionalRegions">additionalRegions</a></code> | <code>string[]</code> | Additional regions to accept as Lambda MicroVMs regions, beyond the ones this library already knows about. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersProps.property.consoleLogs">consoleLogs</a></code> | <code><a href="#cdk-github-microvm-runners.ConsoleLogs">ConsoleLogs</a></code> | Where a VM's runtime console goes: everything it prints while it boots, runs the runner agent, and runs the job. |
 | <code><a href="#cdk-github-microvm-runners.GithubMicrovmRunnersProps.property.deadLetterRetention">deadLetterRetention</a></code> | <code>aws-cdk-lib.Duration</code> | How long the dead-letter queue retains a failed launch or terminate intent. |
@@ -791,7 +791,7 @@ public readonly scope: RunnerScope;
 
 - *Type:* <a href="#cdk-github-microvm-runners.RunnerScope">RunnerScope</a>
 
-Which GitHub scope, an organization or a list of repositories, registered runners are visible to.
+Which GitHub scope, one organization, several organizations, or a list of repositories, registered runners are visible to.
 
 ---
 
@@ -3796,7 +3796,7 @@ Subnet selection for the built connector, set only for a `vpc()` network.
 
 ### RunnerScope <a name="RunnerScope" id="cdk-github-microvm-runners.RunnerScope"></a>
 
-Which GitHub scope registered runners are visible to: an entire organization, or an explicit list of `owner/repo` repositories.
+Which GitHub scope registered runners are visible to: an entire organization, several organizations, or an explicit list of `owner/repo` repositories.
 
 Build one with the static factories below; the constructor is private.
 
@@ -3828,6 +3828,7 @@ Serialize this scope to the JSON form the runner set's handlers read at runtime.
 | **Name** | **Description** |
 | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.RunnerScope.org">org</a></code> | Runners are registered at the organization level. |
+| <code><a href="#cdk-github-microvm-runners.RunnerScope.orgs">orgs</a></code> | Runners are registered at the organization level in each listed organization: one runner set serving several organizations. |
 | <code><a href="#cdk-github-microvm-runners.RunnerScope.repos">repos</a></code> | Runners are registered against an explicit list of `owner/repo` repos. |
 
 ---
@@ -3852,6 +3853,36 @@ const orgScope = RunnerScope.org('my-org');
 ###### `org`<sup>Required</sup> <a name="org" id="cdk-github-microvm-runners.RunnerScope.org.parameter.org"></a>
 
 - *Type:* string
+
+---
+
+##### `orgs` <a name="orgs" id="cdk-github-microvm-runners.RunnerScope.orgs"></a>
+
+```typescript
+import { RunnerScope } from 'cdk-github-microvm-runners'
+
+RunnerScope.orgs(orgs: string[])
+```
+
+Runners are registered at the organization level in each listed organization: one runner set serving several organizations.
+
+A job's
+runner registers in the organization that owns the job's repository.
+
+Install the runner set's GitHub App on every listed organization. A
+runner class on this scope cannot set `warmPoolSize`; that throws at
+synth.
+
+*Example*
+
+```typescript
+const multiOrgScope = RunnerScope.orgs(['my-org', 'my-other-org']);
+```
+
+
+###### `orgs`<sup>Required</sup> <a name="orgs" id="cdk-github-microvm-runners.RunnerScope.orgs.parameter.orgs"></a>
+
+- *Type:* string[]
 
 ---
 
@@ -3882,8 +3913,9 @@ const repoScope = RunnerScope.repos(['my-org/api', 'my-org/web']);
 
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
-| <code><a href="#cdk-github-microvm-runners.RunnerScope.property.kind">kind</a></code> | <code><a href="#cdk-github-microvm-runners.RunnerScopeKind">RunnerScopeKind</a></code> | Whether this scope is an organization or a list of repositories. |
+| <code><a href="#cdk-github-microvm-runners.RunnerScope.property.kind">kind</a></code> | <code><a href="#cdk-github-microvm-runners.RunnerScopeKind">RunnerScopeKind</a></code> | Whether this scope is an organization, several organizations, or a list of repositories. |
 | <code><a href="#cdk-github-microvm-runners.RunnerScope.property.organization">organization</a></code> | <code>string</code> | The organization, for a scope built with `RunnerScope.org()`. |
+| <code><a href="#cdk-github-microvm-runners.RunnerScope.property.organizations">organizations</a></code> | <code>string[]</code> | The organizations, for a scope built with `RunnerScope.orgs()`. |
 | <code><a href="#cdk-github-microvm-runners.RunnerScope.property.repositories">repositories</a></code> | <code>string[]</code> | The `owner/repo` list, for a scope built with `RunnerScope.repos()`. |
 
 ---
@@ -3896,7 +3928,7 @@ public readonly kind: RunnerScopeKind;
 
 - *Type:* <a href="#cdk-github-microvm-runners.RunnerScopeKind">RunnerScopeKind</a>
 
-Whether this scope is an organization or a list of repositories.
+Whether this scope is an organization, several organizations, or a list of repositories.
 
 ---
 
@@ -3909,6 +3941,18 @@ public readonly organization: string;
 - *Type:* string
 
 The organization, for a scope built with `RunnerScope.org()`.
+
+---
+
+##### `organizations`<sup>Optional</sup> <a name="organizations" id="cdk-github-microvm-runners.RunnerScope.property.organizations"></a>
+
+```typescript
+public readonly organizations: string[];
+```
+
+- *Type:* string[]
+
+The organizations, for a scope built with `RunnerScope.orgs()`.
 
 ---
 
@@ -4296,6 +4340,7 @@ Which GitHub scope a `RunnerScope` represents.
 | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.RunnerScopeKind.ORG">ORG</a></code> | Runners are registered at the organization level. |
 | <code><a href="#cdk-github-microvm-runners.RunnerScopeKind.REPOS">REPOS</a></code> | Runners are registered against an explicit list of repositories. |
+| <code><a href="#cdk-github-microvm-runners.RunnerScopeKind.ORGS">ORGS</a></code> | Runners are registered at the organization level, in each of several organizations. |
 
 ---
 
@@ -4309,6 +4354,13 @@ Runners are registered at the organization level.
 ##### `REPOS` <a name="REPOS" id="cdk-github-microvm-runners.RunnerScopeKind.REPOS"></a>
 
 Runners are registered against an explicit list of repositories.
+
+---
+
+
+##### `ORGS` <a name="ORGS" id="cdk-github-microvm-runners.RunnerScopeKind.ORGS"></a>
+
+Runners are registered at the organization level, in each of several organizations.
 
 ---
 

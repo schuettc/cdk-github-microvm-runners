@@ -1636,12 +1636,23 @@ function queuedJobAgeSeconds(
   return Math.max(0, Math.floor((nowMs - originMs) / 1000));
 }
 
-/** The repos this sweep scans for queued jobs: every installation repo (org scope) or the configured repos (repos scope). */
+/** The repos this sweep scans for queued jobs: every installation repo of the org (org scope) or of each listed org (orgs scope), or the configured repos (repos scope). */
 async function reposToScan(ctx: JanitorContext): Promise<RepoToScan[]> {
   if (ctx.scope.kind === 'org') {
     const target = resolveTarget(ctx.scope);
     const repos = await listInstallationRepos(target);
     return repos.map((r) => ({ owner: r.owner, repo: r.repo, target }));
+  }
+  if (ctx.scope.kind === 'orgs') {
+    const scan: RepoToScan[] = [];
+    for (const org of ctx.scope.orgs ?? []) {
+      const target = { org };
+      const repos = await listInstallationRepos(target);
+      scan.push(
+        ...repos.map((r) => ({ owner: r.owner, repo: r.repo, target })),
+      );
+    }
+    return scan;
   }
   const scan: RepoToScan[] = [];
   for (const full of ctx.scope.repos ?? []) {
@@ -1810,7 +1821,10 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
   // `queuedJobAgeAlarm` look healthy when the scan never actually ran. The
   // construct refuses to synthesize `queuedJobAgeAlarm` in this configuration,
   // so no alarm depends on these metrics.
-  if (process.env.GH_AUTH_KIND === 'pat' && ctx.scope.kind === 'org') {
+  if (
+    process.env.GH_AUTH_KIND === 'pat' &&
+    (ctx.scope.kind === 'org' || ctx.scope.kind === 'orgs')
+  ) {
     return;
   }
   const classLabels = Object.keys(readSizeClasses());

@@ -21,10 +21,11 @@
  */
 import type { ScopeTarget } from './github-client.js';
 
-/** Parsed `SCOPE_JSON` env var: which GitHub scope (org or explicit repos) is visible to this runner set. */
+/** Parsed `SCOPE_JSON` env var: which GitHub scope (one org, several orgs, or explicit repos) is visible to this runner set. */
 export interface ScopeConfig {
-  kind: 'org' | 'repos';
+  kind: 'org' | 'orgs' | 'repos';
   org?: string;
+  orgs?: string[];
   repos?: string[];
 }
 
@@ -109,7 +110,7 @@ export interface RunnerSetConfig {
   readIdlePolicies(): IdlePolicyConfig;
   /** The set of image ARNs this runner set's VMs may run from: every `SIZE_CLASSES_JSON` value plus the `IMAGE_ARN` fallback, deduplicated. */
   runnerSetImageArns(): string[];
-  /** `ScopeConfig` + an optional `owner/name` repo -> a github-client `ScopeTarget`, honoring org vs. repos scope. */
+  /** `ScopeConfig` + an optional `owner/name` repo -> a github-client `ScopeTarget`, honoring org, orgs and repos scope. */
   resolveTarget(scope: ScopeConfig, repo?: string): ScopeTarget;
   /**
    * Does this runner set serve `repo` ("owner/name")? Case-insensitive, as
@@ -189,6 +190,11 @@ export function isRepoInScope(
   // carries a valid signature, so the owner is checked rather than assumed.
   if (scope.kind === 'org') {
     return eqFold(owner, scope.org);
+  }
+  // A multi-org set serves every repository under any of its orgs, by the
+  // same owner check.
+  if (scope.kind === 'orgs') {
+    return (scope.orgs ?? []).some((org) => eqFold(owner, org));
   }
   return (scope.repos ?? []).some((allowed) => eqFold(allowed, repo));
 }
@@ -272,6 +278,24 @@ export function runnerSetConfigFor(moduleName: string): RunnerSetConfig {
         );
       }
       return { org: scope.org };
+    }
+    if (scope.kind === 'orgs') {
+      // The runner registers in the org that owns the repo, spelled as
+      // SCOPE_JSON lists it: GitHub resolves either case, and the listed
+      // spelling keeps one cache key per org.
+      if (!repo) {
+        throw new Error(
+          `${moduleName}: orgs-scoped row is missing its repo field`,
+        );
+      }
+      const owner = repoOwner(repo);
+      const org = (scope.orgs ?? []).find((o) => eqFold(o, owner));
+      if (!org) {
+        throw new Error(
+          `${moduleName}: repo "${repo}" is not under any org in SCOPE_JSON`,
+        );
+      }
+      return { org };
     }
     if (!repo) {
       throw new Error(
