@@ -251,7 +251,7 @@ const IMAGE_VERSION_ACTIONS = [
 export interface GithubMicrovmRunnersProps {
   /** How the runner set authenticates to GitHub, as an App or with a personal access token. This also carries the webhook secret. */
   readonly github: GithubAuth;
-  /** Which GitHub scope, an organization or a list of repositories, registered runners are visible to. */
+  /** Which GitHub scope, one organization, several organizations, or a list of repositories, registered runners are visible to. */
   readonly scope: RunnerScope;
   /**
    * Customer-managed KMS key for this runner set's data at rest: the DynamoDB
@@ -1452,10 +1452,14 @@ export class GithubMicrovmRunners extends Construct {
       readFileSync(join(__dirname, '..', 'package.json'), 'utf8'),
     ) as { name: string; version: string };
     const [major, minor] = pkg.version.split('.');
+    // A multi-org set is set up against its first org; the App is then
+    // installed on the others (docs/getting-started.md).
     const setupTarget =
       props.scope.kind === RunnerScopeKind.ORG
         ? `--org ${props.scope.organization}`
-        : `--account ${props.scope.repositories![0].split('/')[0]}`;
+        : props.scope.kind === RunnerScopeKind.ORGS
+          ? `--org ${props.scope.organizations![0]}`
+          : `--account ${props.scope.repositories![0].split('/')[0]}`;
     this.setupCommand = [
       `npx ${pkg.name}@${major}.${minor} setup`,
       setupTarget,
@@ -1792,7 +1796,8 @@ export class GithubMicrovmRunners extends Construct {
     // refuses to synthesize (see GithubMicrovmRunnersMetrics.queuedJobAgeAlarm).
     const queuedJobScanUnavailable =
       props.github.kind === GithubAuthKind.PAT &&
-      props.scope.kind === RunnerScopeKind.ORG;
+      (props.scope.kind === RunnerScopeKind.ORG ||
+        props.scope.kind === RunnerScopeKind.ORGS);
     if (emitMetrics && queuedJobScanUnavailable) {
       Annotations.of(this).addWarning(
         'GithubMicrovmRunners: emitMetrics is on with PAT auth + org scope, so the janitor cannot ' +

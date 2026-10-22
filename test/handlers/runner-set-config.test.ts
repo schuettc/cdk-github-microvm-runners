@@ -1,4 +1,7 @@
-import { runnerSetConfigFor } from '../../src/handlers/shared/runner-set-config.js';
+import {
+  isRepoInScope,
+  runnerSetConfigFor,
+} from '../../src/handlers/shared/runner-set-config.js';
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -221,10 +224,41 @@ describe('runnerSetConfigFor: resolveTarget', () => {
     ).toThrow('testmod: repos-scoped row is missing its repo field');
   });
 
+  it('orgs scope resolves to { org } of the repo owner, as listed', () => {
+    const { resolveTarget } = runnerSetConfigFor('testmod');
+    const scope = { kind: 'orgs' as const, orgs: ['a', 'b'] };
+    expect(resolveTarget(scope, 'b/y')).toEqual({ org: 'b' });
+    expect(resolveTarget(scope, 'B/y')).toEqual({ org: 'b' });
+  });
+
+  it('orgs scope with no repo argument throws', () => {
+    const { resolveTarget } = runnerSetConfigFor('testmod');
+    expect(() => resolveTarget({ kind: 'orgs', orgs: ['a', 'b'] })).toThrow(
+      'testmod: orgs-scoped row is missing its repo field',
+    );
+  });
+
+  it('orgs scope with a repo outside the listed orgs throws', () => {
+    const { resolveTarget } = runnerSetConfigFor('testmod');
+    expect(() =>
+      resolveTarget({ kind: 'orgs', orgs: ['a', 'b'] }, 'c/z'),
+    ).toThrow('testmod: repo "c/z" is not under any org in SCOPE_JSON');
+  });
+
   it('repos scope with a malformed repo (no slash) throws', () => {
     const { resolveTarget } = runnerSetConfigFor('testmod');
     expect(() =>
       resolveTarget({ kind: 'repos', repos: ['widgets'] }, 'widgets'),
     ).toThrow('testmod: malformed repo "widgets", expected owner/name');
+  });
+});
+
+describe('isRepoInScope', () => {
+  it('orgs scope serves a repo whose owner case-folds equal to any listed org', () => {
+    const scope = { kind: 'orgs' as const, orgs: ['a', 'b'] };
+    expect(isRepoInScope(scope, 'a/x')).toBe(true);
+    expect(isRepoInScope(scope, 'B/y')).toBe(true);
+    expect(isRepoInScope(scope, 'c/z')).toBe(false);
+    expect(isRepoInScope(scope, undefined)).toBe(false);
   });
 });

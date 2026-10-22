@@ -23,7 +23,8 @@ Extra labels are fine; a missing class label means nothing happens at all.
 **2. Is the repository in scope?** `RunnerScope.repos([...])` is enforced, not
 descriptive — a repository not on the list is ignored even though the App is
 installed on it and the delivery is correctly signed. `RunnerScope.org()`
-serves every repository in that organization and nothing outside it. Look for
+serves every repository in that organization and nothing outside it, and
+`RunnerScope.orgs([...])` every repository in any of the listed organizations. Look for
 `launcher: repo is outside this runner set scope` in the launcher's log.
 
 **3. Is the App installed on that repository, and delivering?** Check the App's

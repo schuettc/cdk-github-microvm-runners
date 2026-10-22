@@ -438,6 +438,21 @@ describe('launch: happy path', () => {
     );
   });
 
+  it('uses the repo owner as an org target when SCOPE_JSON kind=orgs', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'globex'] }),
+    });
+    const event = batchEvent([
+      sqsRecord('m1', launchMessage({ repo: 'globex/gadgets' })),
+    ]);
+
+    await handler(event, {} as never, undefined as never);
+
+    expect(generateJitConfigMock).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { org: 'globex' } }),
+    );
+  });
+
   it('selects the last matching SIZE_CLASSES_JSON key when multiple labels match (largest wins)', async () => {
     const event = batchEvent([
       sqsRecord('m1', launchMessage({ labels: ['microvm', 'microvm-8gb'] })),
@@ -1871,6 +1886,20 @@ describe('scope enforcement (defence in depth behind the webhook)', () => {
 
     expect(generateJitConfigMock).toHaveBeenCalled();
     expect(mvmMock.commandCalls(RunMicrovmCommand)).toHaveLength(1);
+  });
+
+  it('orgs scope: an owner outside every listed org is dropped', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'globex'] }),
+    });
+    const event = batchEvent([
+      sqsRecord('m1', launchMessage({ repo: 'other-org/widgets' })),
+    ]);
+
+    await handler(event, {} as never, undefined as never);
+
+    expect(mvmMock.calls()).toHaveLength(0);
+    expect(ddbMock.calls()).toHaveLength(0);
   });
 
   it('org scope: a foreign owner is dropped even though the App installation is valid', async () => {

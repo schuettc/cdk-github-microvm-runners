@@ -2458,6 +2458,18 @@ describe('GithubMicrovmRunners: ready-made alarms', () => {
     );
   });
 
+  it('queuedJobAgeAlarm throws at synth under PAT auth with orgs scope too', () => {
+    const stack = newStack();
+    const runners = mkRunners(stack, 'Runners', {
+      ...minimalProps(stack),
+      scope: RunnerScope.orgs(['org-a', 'org-b']),
+      emitMetrics: true,
+    });
+    expect(() => runners.metrics.queuedJobAgeAlarm(stack, 'microvm')).toThrow(
+      /queuedJobAgeAlarm\(\) is unavailable under PAT auth with org scope/,
+    );
+  });
+
   it('emitMetrics on with PAT auth + org scope emits a synth-time warning that the queued-job scan is unavailable', () => {
     const stack = newStack();
     mkRunners(stack, 'Runners', {
@@ -2806,6 +2818,19 @@ describe('GithubMicrovmRunners: setupCommand', () => {
     expect(runners.setupCommand).toContain('--org my-org');
     expect(runners.setupCommand).toContain('--stack Runners');
     expect(runners.setupCommand).toContain('--region us-east-1');
+  });
+
+  it('uses --org with the first org for a multi-org runner set', () => {
+    const stack = new Stack(new App(), 'Runners', {
+      env: { account: '111122223333', region: 'us-east-1' },
+    });
+    const runners = new GithubMicrovmRunners(stack, 'Runners', {
+      github: patAuth(stack),
+      scope: RunnerScope.orgs(['org-a', 'org-b']),
+    });
+
+    expect(runners.setupCommand).toContain('--org org-a');
+    expect(runners.setupCommand).not.toContain('org-b');
   });
 
   it('uses --account for a repository-scoped runner set', () => {
