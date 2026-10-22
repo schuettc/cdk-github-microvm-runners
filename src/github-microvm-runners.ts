@@ -1213,7 +1213,6 @@ export class GithubMicrovmRunners extends Construct {
   private readonly classRegistry: InternalRunnerClass[] = [];
   /** Captured from props/defaults for `addRunnerClass` to build each class's `ImagePipeline` after construction. */
   private readonly runnerSetId: string;
-  private readonly scopeKind: RunnerScopeKind;
   private readonly network: RunnerNetwork;
   private readonly imageLogs?: ImageLogs;
   /** Backing field for the {@link warmPoolFunction} getter — also doubles as the "warm-pool infra already created" guard in {@link createWarmPoolInfra}. */
@@ -1444,7 +1443,6 @@ export class GithubMicrovmRunners extends Construct {
 
     // --- Shared env fragments --------------------------------------------
     const scopeJson = props.scope.toJson();
-    this.scopeKind = props.scope.kind;
     // package.json sits one directory above the compiled `lib/`, and one above
     // `src/` when the tests run from source — the same relative position either
     // way, and the same `__dirname` trick as HANDLERS_DIR above. Minor-pinned
@@ -1455,7 +1453,7 @@ export class GithubMicrovmRunners extends Construct {
     ) as { name: string; version: string };
     const [major, minor] = pkg.version.split('.');
     // A multi-org set is set up against its first org; the App is then
-    // installed on the others (docs/onboarding.md).
+    // installed on the others (docs/getting-started.md).
     const setupTarget =
       props.scope.kind === RunnerScopeKind.ORG
         ? `--org ${props.scope.organization}`
@@ -1851,12 +1849,6 @@ export class GithubMicrovmRunners extends Construct {
         `runner class "${label}": warmPoolSize`,
         props.warmPoolSize,
       );
-      if (this.scopeKind === RunnerScopeKind.ORGS) {
-        throw new Error(
-          `GithubMicrovmRunners: runner class "${label}": warmPoolSize is not supported with RunnerScope.orgs(). ` +
-            'Drop warmPoolSize from the class, or deploy one runner set per organization with RunnerScope.org().',
-        );
-      }
     }
     if (props.idlePolicy !== undefined) {
       // Catch a zero/negative idle Duration at synth. Otherwise it flows

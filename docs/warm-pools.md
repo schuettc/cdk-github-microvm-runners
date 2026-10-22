@@ -16,9 +16,6 @@ runners.addRunnerClass('microvm', {
 That keeps three VMs of that class ready. It is a count, not a flag — classes
 without `warmPoolSize` cold-launch every job, which is the default.
 
-A runner set scoped with `RunnerScope.orgs([...])` cannot keep a warm pool:
-`warmPoolSize` on any of its classes throws at synth.
-
 ## What it changes
 
 A cold launch boots a VM from the class's image, then registers a runner

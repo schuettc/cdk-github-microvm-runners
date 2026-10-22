@@ -1320,20 +1320,6 @@ describe('GithubMicrovmRunners: per-class warmPoolSize validation', () => {
     },
   );
 
-  it('addRunnerClass throws for a warm class on a multi-org runner set', () => {
-    const stack = newStack();
-    const runners = new GithubMicrovmRunners(stack, 'Runners', {
-      ...minimalProps(stack),
-      scope: RunnerScope.orgs(['org-a', 'org-b']),
-    });
-    expect(() =>
-      runners.addRunnerClass('microvm', {
-        size: MicrovmSize.GB4,
-        warmPoolSize: 1,
-      }),
-    ).toThrow(/warmPoolSize is not supported with RunnerScope\.orgs/);
-  });
-
   it('accepts a positive integer warmPoolSize and does not throw', () => {
     const stack = newStack();
     const runners = new GithubMicrovmRunners(
