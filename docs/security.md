@@ -41,8 +41,10 @@ checked too. Out-of-scope deliveries are ignored, and nothing is spent on
 them.
 
 `RunnerScope.org('acme')` serves every repository in that organization.
-`RunnerScope.repos(['acme/api', 'acme/web'])` serves those two and nothing
-else. Matching is case-insensitive, as GitHub is.
+`RunnerScope.orgs(['acme', 'globex'])` serves every repository in either
+organization, and registers each runner in the organization that owns the job's
+repository. `RunnerScope.repos(['acme/api', 'acme/web'])` serves those two and
+nothing else. Matching is case-insensitive, as GitHub is.
 
 ### Public repositories
 

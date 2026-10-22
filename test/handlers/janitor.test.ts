@@ -1302,6 +1302,50 @@ describe('repos scope fan-out', () => {
   });
 });
 
+describe('orgs scope fan-out', () => {
+  it('reconciles runners in every listed org, each against its own org target', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'Globex'] }),
+    });
+    setRunnerSetVms([{ microvmId: 'mvm-1' }, { microvmId: 'mvm-2' }]);
+    setTableRows([
+      normalRow({
+        runnerName: 'microvm-runner-x-aaaa1111',
+        microvmId: 'mvm-1',
+        repo: 'acme/widgets',
+      }),
+      normalRow({
+        runnerName: 'microvm-runner-x-bbbb2222',
+        microvmId: 'mvm-2',
+        repo: 'globex/gadgets',
+      }),
+    ]);
+    listRunnersMock.mockImplementation(async (target) =>
+      'org' in target && target.org === 'acme'
+        ? [
+            githubRunner({
+              id: 1,
+              name: 'microvm-runner-x-aaaa1111',
+              busy: true,
+            }),
+          ]
+        : [
+            githubRunner({
+              id: 2,
+              name: 'microvm-runner-x-bbbb2222',
+              busy: true,
+            }),
+          ],
+    );
+
+    await handler();
+
+    expect(listRunnersMock).toHaveBeenCalledWith({ org: 'acme' });
+    expect(listRunnersMock).toHaveBeenCalledWith({ org: 'Globex' });
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+});
+
 describe('image version pruning', () => {
   function versionSummary(overrides: {
     imageVersion: string;
@@ -2817,6 +2861,91 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     // Two repos each with one queued microvm job.
     expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(2);
     logSpy.mockRestore();
+  });
+
+  it('orgs scope scans the installation repos of every listed org', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'globex'] }),
+    });
+    listInstallationReposMock.mockImplementation(async (target) =>
+      'org' in target && target.org === 'acme'
+        ? [{ owner: 'acme', repo: 'widgets' }]
+        : [{ owner: 'globex', repo: 'gadgets' }],
+    );
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(120),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(listInstallationReposMock).toHaveBeenCalledWith({ org: 'acme' });
+    expect(listInstallationReposMock).toHaveBeenCalledWith({ org: 'globex' });
+    const scanned = listWorkflowRunsMock.mock.calls.map((c) => [c[0], c[2]]);
+    expect(scanned).toEqual(
+      expect.arrayContaining([
+        [{ org: 'acme' }, 'widgets'],
+        [{ org: 'globex' }, 'gadgets'],
+      ]),
+    );
+    expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(2);
+    logSpy.mockRestore();
+  });
+
+  it('orgs scope: one org that cannot be read is counted and isolated; the other org is still scanned', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'globex'] }),
+    });
+    listInstallationReposMock.mockImplementation(async (target) => {
+      if ('org' in target && target.org === 'globex') {
+        throw new Error('no GitHub App installation found for globex');
+      }
+      return [{ owner: 'acme', repo: 'widgets' }];
+    });
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(120),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    const errSpy = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const scanned = listWorkflowRunsMock.mock.calls.map((c) => [c[0], c[2]]);
+    // Runs are listed once per status, so acme/widgets appears more than once.
+    expect(scanned.length).toBeGreaterThan(0);
+    expect(
+      scanned.every(
+        ([target, repo]) =>
+          (target as { org: string }).org === 'acme' && repo === 'widgets',
+      ),
+    ).toBe(true);
+    expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(1);
+    const perSweep = emfLines(logSpy).find((e) => e.errors !== undefined) as {
+      errors: number;
+    };
+    expect(perSweep.errors).toBe(1);
+    logSpy.mockRestore();
+    errSpy.mockRestore();
   });
 
   it('one repo returning 403 is counted in errors and isolated; the other repos are still scanned and class metrics still emitted', async () => {

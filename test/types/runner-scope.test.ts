@@ -45,4 +45,27 @@ describe('RunnerScope', () => {
       JSON.stringify({ kind: 'repos', repos: ['owner/repo'] }),
     );
   });
+
+  it('orgs() sets kind orgs and the org list', () => {
+    const scope = RunnerScope.orgs(['org-a', 'org-b']);
+    expect(scope.kind).toBe('orgs');
+    expect(scope.organizations).toEqual(['org-a', 'org-b']);
+    expect(scope.organization).toBeUndefined();
+    expect(scope.repositories).toBeUndefined();
+  });
+
+  it('orgs() rejects an empty array', () => {
+    expect(() => RunnerScope.orgs([])).toThrow(/at least one/);
+  });
+
+  it('orgs() rejects an entry that is empty or contains a slash', () => {
+    expect(() => RunnerScope.orgs([''])).toThrow(/organization/);
+    expect(() => RunnerScope.orgs(['owner/repo'])).toThrow(/organization/);
+  });
+
+  it('toJson() serializes orgs scope as { kind: orgs, orgs }', () => {
+    expect(RunnerScope.orgs(['org-a', 'org-b']).toJson()).toBe(
+      JSON.stringify({ kind: 'orgs', orgs: ['org-a', 'org-b'] }),
+    );
+  });
 });

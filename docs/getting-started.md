@@ -159,6 +159,13 @@ A runner set scoped to repositories rather than an organization prints
 `Administration: write`, which is what GitHub requires to register a runner on a
 single repository.
 
+A runner set serving several organizations, `RunnerScope.orgs([...])`, prints
+`--org` with the first organization it lists. Run that setup once, then install
+the same App on each of the other organizations from its settings page (the App
+must be public to be installed outside the organization that owns it). The
+other organizations need nothing else: the runner set registers each job's
+runner in the organization that owns the job's repository.
+
 From a clone of this repository, `node scripts/setup-github-app.mjs` takes the
 same flags.
 
