@@ -1647,10 +1647,24 @@ async function reposToScan(ctx: JanitorContext): Promise<RepoToScan[]> {
     const scan: RepoToScan[] = [];
     for (const org of ctx.scope.orgs ?? []) {
       const target = { org };
-      const repos = await listInstallationRepos(target);
-      scan.push(
-        ...repos.map((r) => ({ owner: r.owner, repo: r.repo, target })),
-      );
+      try {
+        const repos = await listInstallationRepos(target);
+        scan.push(
+          ...repos.map((r) => ({ owner: r.owner, repo: r.repo, target })),
+        );
+      } catch (err) {
+        // Per-org isolation: one org the App cannot read (not installed
+        // there, or uninstalled) must not blank the other orgs' scan.
+        ctx.metrics.errors += 1;
+        console.error(
+          JSON.stringify({
+            scope: 'queued-job-scan',
+            action: 'enumerate-org-repos-failed',
+            org,
+            err: serializeError(err),
+          }),
+        );
+      }
     }
     return scan;
   }

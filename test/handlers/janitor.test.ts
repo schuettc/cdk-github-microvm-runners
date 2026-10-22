@@ -2901,6 +2901,53 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     logSpy.mockRestore();
   });
 
+  it('orgs scope: one org that cannot be read is counted and isolated; the other org is still scanned', async () => {
+    setEnv({
+      SCOPE_JSON: JSON.stringify({ kind: 'orgs', orgs: ['acme', 'globex'] }),
+    });
+    listInstallationReposMock.mockImplementation(async (target) => {
+      if ('org' in target && target.org === 'globex') {
+        throw new Error('no GitHub App installation found for globex');
+      }
+      return [{ owner: 'acme', repo: 'widgets' }];
+    });
+    queuedRunsPage([{ id: 11, status: 'queued', createdAt: undefined }]);
+    jobsPage([
+      {
+        id: 101,
+        status: 'queued',
+        labels: ['self-hosted', 'microvm'],
+        startedAt: undefined,
+        createdAt: isoMinusSeconds(120),
+      },
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    const errSpy = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const scanned = listWorkflowRunsMock.mock.calls.map((c) => [c[0], c[2]]);
+    // Runs are listed once per status, so acme/widgets appears more than once.
+    expect(scanned.length).toBeGreaterThan(0);
+    expect(
+      scanned.every(
+        ([target, repo]) =>
+          (target as { org: string }).org === 'acme' && repo === 'widgets',
+      ),
+    ).toBe(true);
+    expect(classEnvelope(logSpy, 'microvm')?.QueuedJobs).toBe(1);
+    const perSweep = emfLines(logSpy).find((e) => e.errors !== undefined) as {
+      errors: number;
+    };
+    expect(perSweep.errors).toBe(1);
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
   it('one repo returning 403 is counted in errors and isolated; the other repos are still scanned and class metrics still emitted', async () => {
     setEnv({
       SCOPE_JSON: JSON.stringify({

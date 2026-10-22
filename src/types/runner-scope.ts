@@ -36,9 +36,7 @@ export class RunnerScope {
    * organization: one runner set serving several organizations. A job's
    * runner registers in the organization that owns the job's repository.
    *
-   * Install the runner set's GitHub App on every listed organization. A
-   * runner class on this scope cannot set `warmPoolSize`; that throws at
-   * synth.
+   * Install the runner set's GitHub App on every listed organization.
    *
    * @example
    * const multiOrgScope = RunnerScope.orgs(['my-org', 'my-other-org']);
