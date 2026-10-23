@@ -91,8 +91,10 @@ deployed before the App exists.
 ## 2. Deploy
 
 ```bash
-cdk deploy
+cdk deploy --no-rollback
 ```
+
+Deploy with `--no-rollback`, here and on every later deploy. An image build occasionally fails on the service side ("Build workflow was interrupted by an exception"), and when the stack then rolls back in full, the rollback deletes the newest version of each image, including the version a runner class whose build failed was still using, so that class falls back to an older build. With `--no-rollback`, CloudFormation rolls back only the failed image and keeps its working version, the deploy still ends in `UPDATE_FAILED`, and running the same deploy again finishes it.
 
 The stack's `WebhookUrl` output is the address GitHub delivers events to, and
 its `SetupCommand` output is the step 3 command with its values already filled

@@ -221,7 +221,14 @@ export function renderDockerfile(o: NormalizedImageOptions): string {
       'RUN dnf install -y ' +
         [...BASE_PACKAGES, ...systemPackages].join(' ') +
         ' && dnf clean all',
-      'RUN dnf install -y gh --repofrompath gh-cli,https://cli.github.com/packages/rpm || true',
+      // GitHub CLI, which GitHub-hosted runners ship and shared actions call.
+      // Installed from GitHub's repo file with signature checking on. This
+      // image's dnf does not fetch a repo's `gpgkey` itself ("cannot be
+      // verified"), so the key is imported with rpm first. It also rejects
+      // `--repofrompath` ("Unknown option"); an earlier `|| true` hid that, so
+      // every image shipped without gh. No `|| true`: a failed install must
+      // fail the image build. Verified on al2023-minimal arm64, 2026-10-23.
+      'RUN curl -fsSLo /tmp/gh.asc https://cli.github.com/packages/githubcli-archive-keyring.asc && rpm --import /tmp/gh.asc && rm /tmp/gh.asc && curl -fsSLo /etc/yum.repos.d/gh-cli.repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install -y gh && dnf clean all',
       // AWS CLI v2 (ARM64). Baked in because it's a near-universal CI need —
       // ECR login (`aws ecr get-login-password`), `aws s3`/`sts`, and any job
       // that shells out to `aws` — and GitHub-hosted runners include it, so

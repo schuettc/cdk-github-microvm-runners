@@ -43,7 +43,7 @@ their output:
 
 ```
 #6 [2/9] RUN dnf install -y libicu bash git docker jq tar zip unzip nodejs22 sudo shadow-utils && dnf clean all
-#7 [3/9] RUN dnf install -y gh --repofrompath gh-cli,https://cli.github.com/packages/rpm || true
+#7 [3/9] RUN curl -fsSLo /tmp/gh.asc https://cli.github.com/packages/githubcli-archive-keyring.asc && rpm --import /tmp/gh.asc && rm /tmp/gh.asc && curl -fsSLo /etc/yum.repos.d/gh-cli.repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install -y gh && dnf clean all
 #8 [4/9] RUN curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o /tmp/awscliv2.zip
 #14 exporting layers
 #14 exporting layers 23.1s done
