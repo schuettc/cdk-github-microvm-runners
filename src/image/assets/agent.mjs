@@ -57,27 +57,18 @@ let dockerStarted = false;
 
 /**
  * The `run.sh` argv the runner is started with (as arguments to `sudo -u
- * runner`). Two flags matter here:
- *   --disableupdate  the runner must NOT self-update. GitHub advises disabling
- *                    automatic updates for ephemeral runners, and GitHub's own
- *                    actions-runner-controller runs with DisableUpdate by
- *                    default; a stale runner that starts an update then stops
- *                    without taking a job was seen live (a consumer's 2.335.1
- *                    runners registered, went offline, and were reaped
- *                    2026-09-24). Currency comes from the pinned runner version
- *                    instead (see docs/images.md, "Keeping the runner current").
- *   --jitconfig      the just-in-time config the platform pushed to the VM.
- * Exported pure so a test can assert the flags are present without a VM.
+ * runner`): only `--jitconfig`, the just-in-time config the platform pushed to
+ * the VM. `--disableupdate` is a `config.sh` option, not a `run.sh` one: passed
+ * here it only logged "Unrecognized command-line input arguments". A
+ * just-in-time runner takes its settings from the config GitHub generates, and
+ * neither `run.sh` nor GitHub's JIT-config API has a setting for self-update,
+ * so the agent has no way to switch it off. Keeping
+ * the runner current is the pinned runner version's job (see docs/images.md,
+ * "Keeping the runner current").
+ * Exported pure so a test can assert the exact argv without a VM.
  */
 export function buildRunnerArgs(jitConfig) {
-  return [
-    '-u',
-    'runner',
-    './run.sh',
-    '--disableupdate',
-    '--jitconfig',
-    jitConfig,
-  ];
+  return ['-u', 'runner', './run.sh', '--jitconfig', jitConfig];
 }
 
 /**

@@ -72,7 +72,7 @@ flowchart TD
 
 5. The **MicroVM** runs exactly one job — GitHub's just-in-time runners are
    single-use. Its in-VM agent takes the pushed configuration and starts the
-   runner with self-update disabled; on a Docker-capable image it first starts
+   runner; on a Docker-capable image it first starts
    `dockerd` and waits for it to answer, so a job never starts against a daemon that has not
    finished coming up (see [Runner images](images.md#containers-in-a-job)). The
    runner deregisters itself from GitHub when the job ends, and the VM itself is
