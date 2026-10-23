@@ -261,7 +261,7 @@ The rule and its enforcement timeline are in GitHub's
 
 ### Self-update
 
-A just-in-time runner cannot be told not to self-update. `--disableupdate` is an option of `config.sh`, which configures a long-lived runner; a just-in-time runner is never configured locally and takes its settings from the configuration GitHub generates for it, which offers no such setting. When a runner falls too far behind, what has been seen here is GitHub refusing it rather than updating it: runners on a deprecated release connected, logged "Runner version v2.335.1 is deprecated and cannot receive messages", and exited without taking a job.
+There is no supported way to stop a just-in-time runner self-updating. `--disableupdate` is an option of `config.sh`, which registers a runner locally; a just-in-time runner skips that step and takes its settings from the configuration GitHub generates for it, and neither `run.sh` nor GitHub's API for generating that configuration has an update setting. When a runner falls too far behind, what has been seen here is GitHub refusing it rather than updating it: runners on a deprecated release connected, logged "Runner version v2.335.1 is deprecated and cannot receive messages", and exited without taking a job.
 
 Currency comes from the pin below plus watching for new releases
 (`runner-version-watch`), not from runners updating themselves: bump the pin

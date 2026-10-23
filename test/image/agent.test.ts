@@ -71,8 +71,8 @@ describe('entrypoint.sh', () => {
 
 describe('buildRunnerArgs', () => {
   it('runs run.sh as the runner user with only the run options it accepts', () => {
-    // run.sh accepts --jitconfig, --once and --startuptype; anything else
-    // (such as the configure-only --disableupdate) is logged as unrecognized.
+    // Only --jitconfig. --disableupdate is a config.sh option; run.sh logged
+    // it as unrecognized and ignored it.
     expect(s.args).toEqual([
       '-u',
       'runner',

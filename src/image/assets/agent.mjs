@@ -58,11 +58,11 @@ let dockerStarted = false;
 /**
  * The `run.sh` argv the runner is started with (as arguments to `sudo -u
  * runner`): only `--jitconfig`, the just-in-time config the platform pushed to
- * the VM. `run.sh` accepts nothing else that applies here (`--once` and
- * `--startuptype` are for long-lived runners). In particular `--disableupdate`
- * is a configure-time option: a just-in-time runner takes its settings from the
- * config GitHub generates, so self-update cannot be switched off from here, and
- * passing it only logged "Unrecognized command-line input arguments". Keeping
+ * the VM. `--disableupdate` is a `config.sh` option, not a `run.sh` one: passed
+ * here it only logged "Unrecognized command-line input arguments". A
+ * just-in-time runner takes its settings from the config GitHub generates, and
+ * neither `run.sh` nor GitHub's JIT-config API has a setting for self-update,
+ * so the agent has no way to switch it off. Keeping
  * the runner current is the pinned runner version's job (see docs/images.md,
  * "Keeping the runner current").
  * Exported pure so a test can assert the exact argv without a VM.
