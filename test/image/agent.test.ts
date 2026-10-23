@@ -70,15 +70,16 @@ describe('entrypoint.sh', () => {
 });
 
 describe('buildRunnerArgs', () => {
-  it('passes --disableupdate and --jitconfig <cfg> to run.sh as the runner user', () => {
-    // Started as the non-root runner user, from run.sh.
-    expect(s.args.slice(0, 3)).toEqual(['-u', 'runner', './run.sh']);
-    // The runner must not self-update.
-    expect(s.args).toContain('--disableupdate');
-    // The just-in-time config the platform pushed, as a flag+value pair.
-    const i = s.args.indexOf('--jitconfig');
-    expect(i).toBeGreaterThanOrEqual(0);
-    expect(s.args[i + 1]).toBe('JITCFG');
+  it('runs run.sh as the runner user with only the run options it accepts', () => {
+    // run.sh accepts --jitconfig, --once and --startuptype; anything else
+    // (such as the configure-only --disableupdate) is logged as unrecognized.
+    expect(s.args).toEqual([
+      '-u',
+      'runner',
+      './run.sh',
+      '--jitconfig',
+      'JITCFG',
+    ]);
   });
 });
 

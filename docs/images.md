@@ -259,18 +259,11 @@ queuing jobs to the runner, and registration itself needs at least `2.329.0`.
 The rule and its enforcement timeline are in GitHub's
 [changelog](https://github.blog/changelog/2026-06-12-github-actions-minimum-version-enforcement-timeline-for-self-hosted-runners/).
 
-### The runner does not self-update
+### Self-update
 
-Runners here start with `--disableupdate`, so a VM never downloads and installs
-a newer `actions/runner` at boot. This follows GitHub's own guidance for
-ephemeral runners and matches actions-runner-controller, which runs with
-`DisableUpdate` by default: a just-in-time runner that begins a self-update
-tends to stop without ever taking its job — seen live as stale runners that
-registered, went offline, and were reaped instead of running anything. Because
-the runner is single-use and its version is fixed by the image, a self-update
-buys nothing and only adds a per-boot download and a failure mode.
+A just-in-time runner cannot be told not to self-update. `--disableupdate` is an option of `config.sh`, which configures a long-lived runner; a just-in-time runner is never configured locally and takes its settings from the configuration GitHub generates for it, which offers no such setting. When a runner falls too far behind, what has been seen here is GitHub refusing it rather than updating it: runners on a deprecated release connected, logged "Runner version v2.335.1 is deprecated and cannot receive messages", and exited without taking a job.
 
-Currency therefore comes from the pin below plus watching for new releases
+Currency comes from the pin below plus watching for new releases
 (`runner-version-watch`), not from runners updating themselves: bump the pin
 and redeploy, and the next launch boots an image built with the newer runner.
 
