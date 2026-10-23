@@ -40,6 +40,17 @@ describe('renderDockerfile', () => {
     expect(rendered).not.toContain('docker.io');
   });
 
+  it('installs gh from its repo file, so a failed install fails the image build', () => {
+    const ghLines = renderDockerfile(normalizeImageOptions({}))
+      .split('\n')
+      .filter((l) => /\bgh\b/.test(l));
+
+    expect(ghLines).toEqual([
+      'RUN curl -fsSLo /tmp/gh.asc https://cli.github.com/packages/githubcli-archive-keyring.asc && rpm --import /tmp/gh.asc && rm /tmp/gh.asc && curl -fsSLo /etc/yum.repos.d/gh-cli.repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install -y gh && dnf clean all',
+    ]);
+    expect(ghLines[0]).not.toContain('|| true');
+  });
+
   it('matches the full default-render snapshot', () => {
     expect(renderDockerfile(normalizeImageOptions({}))).toMatchSnapshot();
   });
