@@ -12,6 +12,7 @@
  * the HTTP server — the module guards `listen` behind a main-module check.
  */
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 interface Scenarios {
@@ -49,6 +50,23 @@ beforeAll(() => {
   const driver = join(__dirname, 'agent-scenarios.mjs');
   const stdout = execFileSync(process.execPath, [driver], { encoding: 'utf8' });
   s = JSON.parse(stdout) as Scenarios;
+});
+
+describe('entrypoint.sh', () => {
+  it('raises the open-files limit to 65536 before starting the agent, and stops if it cannot', () => {
+    const commands = readFileSync(
+      join(__dirname, '../../src/image/assets/entrypoint.sh'),
+      'utf8',
+    )
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('#'));
+
+    expect(commands).toEqual([
+      'ulimit -n 65536 || exit 1',
+      'exec node /opt/microvm-runner/agent.mjs',
+    ]);
+  });
 });
 
 describe('buildRunnerArgs', () => {

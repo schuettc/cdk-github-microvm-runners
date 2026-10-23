@@ -200,13 +200,13 @@ The construct stages two files into the build context under
 agent serves the lifecycle hooks the MicroVM service calls, and starts the
 GitHub Actions runner when a job arrives. What it needs to do that:
 
-| The image must have                                                     | Because                                                      |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------ |
-| **Node** on `PATH`                                                      | `entrypoint.sh` is `exec node /opt/microvm-runner/agent.mjs` |
-| **The Actions runner at `/opt/runner`**                                 | the agent runs `./run.sh --jitconfig …` from that directory  |
-| **A user named `runner`**                                               | the agent starts the runner as that user, not as root        |
-| **`sudo`**                                                              | which is how it does so                                      |
-| **Both agent files copied in, and `entrypoint.sh` as the `ENTRYPOINT`** | nothing starts the agent otherwise                           |
+| The image must have                                                     | Because                                                     |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------- |
+| **Node** on `PATH`                                                      | `entrypoint.sh` starts the agent with `node`                |
+| **The Actions runner at `/opt/runner`**                                 | the agent runs `./run.sh --jitconfig …` from that directory |
+| **A user named `runner`**                                               | the agent starts the runner as that user, not as root       |
+| **`sudo`**                                                              | which is how it does so                                     |
+| **Both agent files copied in, and `entrypoint.sh` as the `ENTRYPOINT`** | nothing starts the agent otherwise                          |
 
 The base image is `al2023-minimal`, and it is genuinely minimal. Two absences
 catch people out: **`find` and `xargs` are not installed** — `findutils` is not
