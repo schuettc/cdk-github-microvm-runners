@@ -2937,6 +2937,8 @@ public queuedJobs(runnerClassLabel: string): Metric
 
 Janitor per-class gauge: queued jobs this class owned as of the last sweep (see {@link oldestQueuedJobSeconds} for ownership).
 
+Published only when nonzero; read a missing value as 0.
+
 ###### `runnerClassLabel`<sup>Required</sup> <a name="runnerClassLabel" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.queuedJobs.parameter.runnerClassLabel"></a>
 
 - *Type:* string
@@ -2950,6 +2952,8 @@ public queuedJobScanTruncated(): Metric
 ```
 
 Janitor per-sweep flag: 1 when a sweep hit its GitHub-listing cap and did not scan every queued job, so `oldestQueuedJobSeconds`/`queuedJobs` may under-report that sweep.
+
+Published only on such a sweep.
 
 ##### `stuckClaimsRelaunched` <a name="stuckClaimsRelaunched" id="cdk-github-microvm-runners.GithubMicrovmRunnersMetrics.stuckClaimsRelaunched"></a>
 

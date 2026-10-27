@@ -1791,19 +1791,23 @@ function emitQueuedJobMetrics(
       namespace: EMF_NAMESPACE,
       dimensions: ['RunnerSetId', 'SizeClass'],
       dimensionValues: { RunnerSetId: ctx.runnerSetId, SizeClass: label },
+      // OldestQueuedJobSeconds every sweep, 0 included: `queuedJobAgeAlarm`
+      // treats its absence as the janitor having stopped. QueuedJobs only
+      // when a job is queued (see `emitMetrics` for why zeros are dropped).
       metrics: {
         OldestQueuedJobSeconds: state.oldestQueuedJobSeconds,
-        QueuedJobs: state.queuedJobs,
+        ...(state.queuedJobs > 0 ? { QueuedJobs: state.queuedJobs } : {}),
       },
       units: { OldestQueuedJobSeconds: 'Seconds' },
       timestamp: ctx.nowMs,
     });
   }
+  if (!truncated) return;
   emitEmf({
     namespace: EMF_NAMESPACE,
     dimensions: ['RunnerSetId'],
     dimensionValues: { RunnerSetId: ctx.runnerSetId },
-    metrics: { QueuedJobScanTruncated: truncated ? 1 : 0 },
+    metrics: { QueuedJobScanTruncated: 1 },
     timestamp: ctx.nowMs,
   });
 }
@@ -1903,16 +1907,42 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
   emitQueuedJobMetrics(ctx, states, budget.truncated);
 }
 
-/** EMF structured-log metric emission: one `console.log` JSON envelope per sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`. Opt-in — `emitEmf` writes nothing unless the runner set set `GithubMicrovmRunnersProps.emitMetrics` (see `shared/emf.ts`'s gate). */
+/**
+ * Counters published every sweep, 0 included: the ones the library's alarms
+ * read (`sweepErrorsAlarm`, `stuckLaunchesRecoveredAlarm`,
+ * `stuckRunnersReapedAlarm`). When a period has no data point, CloudWatch
+ * reaches back for older real ones and ignores `treatMissingData`, so without
+ * the zeros an alarm could fire on breaches separated by clean sweeps, or stay
+ * in ALARM after the breach has passed.
+ */
+const ALWAYS_PUBLISHED_COUNTERS = new Set([
+  'errors',
+  'stuckLaunchesRecovered',
+  'stuckRunnersReaped',
+]);
+
+/**
+ * EMF structured-log metric emission: one `console.log` JSON envelope per
+ * sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`. Every other
+ * counter is published only when nonzero: CloudWatch bills a custom metric for
+ * every hour it has a data point, these counters are almost always 0, and no
+ * library alarm reads them. Opt-in — `emitEmf` writes
+ * nothing unless the runner set set `GithubMicrovmRunnersProps.emitMetrics`
+ * (see `shared/emf.ts`'s gate).
+ */
 function emitMetrics(ctx: JanitorContext): void {
+  // `Metrics` is a fixed-field interface (no index signature); every field is
+  // a number, so this is a safe structural cast to `Record<string, number>`.
+  const published = Object.fromEntries(
+    Object.entries(ctx.metrics as unknown as Record<string, number>).filter(
+      ([name, value]) => value !== 0 || ALWAYS_PUBLISHED_COUNTERS.has(name),
+    ),
+  );
   emitEmf({
     namespace: EMF_NAMESPACE,
     dimensions: ['RunnerSetId'],
     dimensionValues: { RunnerSetId: ctx.runnerSetId },
-    // `Metrics` is a fixed-field interface (no index signature); every field
-    // is a number, so this is a safe structural cast to the generic emitter's
-    // `Record<string, number>` shape.
-    metrics: ctx.metrics as unknown as Record<string, number>,
+    metrics: published,
     timestamp: ctx.nowMs,
   });
 }

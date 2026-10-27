@@ -604,12 +604,12 @@ export class GithubMicrovmRunnersMetrics {
     return this.classGaugeMetric('OldestQueuedJobSeconds', runnerClassLabel);
   }
 
-  /** Janitor per-class gauge: queued jobs this class owned as of the last sweep (see {@link oldestQueuedJobSeconds} for ownership). */
+  /** Janitor per-class gauge: queued jobs this class owned as of the last sweep (see {@link oldestQueuedJobSeconds} for ownership). Published only when nonzero; read a missing value as 0. */
   public queuedJobs(runnerClassLabel: string): cloudwatch.Metric {
     return this.classGaugeMetric('QueuedJobs', runnerClassLabel);
   }
 
-  /** Janitor per-sweep flag: 1 when a sweep hit its GitHub-listing cap and did not scan every queued job, so `oldestQueuedJobSeconds`/`queuedJobs` may under-report that sweep. */
+  /** Janitor per-sweep flag: 1 when a sweep hit its GitHub-listing cap and did not scan every queued job, so `oldestQueuedJobSeconds`/`queuedJobs` may under-report that sweep. Published only on such a sweep. */
   public queuedJobScanTruncated(): cloudwatch.Metric {
     return this.emfMetric('QueuedJobScanTruncated');
   }
