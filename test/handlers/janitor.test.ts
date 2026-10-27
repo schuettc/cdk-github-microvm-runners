@@ -1666,12 +1666,22 @@ describe('EMF metrics output', () => {
         CloudWatchMetrics: { Metrics: { Name: string }[] }[];
       }
     ).CloudWatchMetrics[0].Metrics.map((m) => m.Name);
-    expect(names.sort()).toEqual(['lifetimeKills', 'suspectsCleared']);
+    // errors and stuckLaunchesRecovered are always present (see the next test).
+    expect(names.sort()).toEqual([
+      'errors',
+      'lifetimeKills',
+      'stuckLaunchesRecovered',
+      'suspectsCleared',
+    ]);
     expect(counters[0].orphansReaped).toBeUndefined();
     logSpy.mockRestore();
   });
 
-  it('publishes no counter envelope when every counter is zero', async () => {
+  it('always publishes the counters behind three-period alarms, zeros included, and nothing else when all are zero', async () => {
+    // sweepErrorsAlarm and stuckLaunchesRecoveredAlarm need 3 periods in a
+    // row. With a missing period CloudWatch reaches further back for real
+    // data points and ignores treatMissingData, so an error, a clean sweep,
+    // an error would alarm if the clean sweep's 0 were not published.
     setRunnerSetVms([]);
     setTableRows([]);
     listRunnersMock.mockResolvedValue([]);
@@ -1681,7 +1691,16 @@ describe('EMF metrics output', () => {
 
     await handler();
 
-    expect(runnerSetEnvelopes(logSpy)).toEqual([]);
+    const counters = runnerSetEnvelopes(logSpy);
+    expect(counters).toHaveLength(1);
+    const names = (
+      counters[0]._aws as {
+        CloudWatchMetrics: { Metrics: { Name: string }[] }[];
+      }
+    ).CloudWatchMetrics[0].Metrics.map((m) => m.Name);
+    expect(names.sort()).toEqual(['errors', 'stuckLaunchesRecovered']);
+    expect(counters[0].errors).toBe(0);
+    expect(counters[0].stuckLaunchesRecovered).toBe(0);
     logSpy.mockRestore();
   });
 });
@@ -3222,7 +3241,7 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     // No per-class queued-job envelopes emitted (nothing claims 0).
     expect(classEnvelope(logSpy, 'small')).toBeUndefined();
     expect(classEnvelope(logSpy, 'large')).toBeUndefined();
-    // The skip is not an error: errors stays 0 (and so is not published).
+    // The skip is not an error: errors stays 0.
     expect(sweepCounters(logSpy).errors).toBe(0);
     logSpy.mockRestore();
     errorSpy.mockRestore();

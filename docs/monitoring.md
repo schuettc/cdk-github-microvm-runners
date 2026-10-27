@@ -40,11 +40,7 @@ two shapes.
 
 **Per runner set**, dimensioned by `RunnerSetId`, the janitor emits one envelope
 per sweep. Two runner sets in the same account and region report separately.
-It carries only the counters that are nonzero, and the sweep emits nothing at
-all when every counter is 0: CloudWatch charges a custom metric for every hour
-it has a data point, and these counters are almost always 0. Read a missing
-value as 0, as the alarms below do; a graph of one shows gaps rather than a
-flat line at 0.
+It always carries `errors` and `stuckLaunchesRecovered`, 0 included, because their ready-made alarms below need three periods in a row, and CloudWatch fills a missing period from older data rather than from the missing-data setting. Every other counter appears only when it is nonzero: CloudWatch charges a custom metric for every hour it has a data point, and these counters are almost always 0. Read a missing value as 0; a graph of one shows gaps rather than a flat line at 0. An alarm of your own on one of them over several periods should use metric math `FILL(m, 0)`.
 
 | Accessor                          | Counts                                                              |
 | --------------------------------- | ------------------------------------------------------------------- |

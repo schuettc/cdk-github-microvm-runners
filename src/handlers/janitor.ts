@@ -1908,29 +1908,37 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
 }
 
 /**
+ * Counters published every sweep, 0 included: the ones behind the library's
+ * three-period alarms (`sweepErrorsAlarm`, `stuckLaunchesRecoveredAlarm`).
+ * When a period is missing, CloudWatch reaches further back for real data
+ * points and ignores `treatMissingData`, so an error, a clean sweep, an error
+ * would alarm if the clean sweep's 0 were not published.
+ */
+const ALWAYS_PUBLISHED_COUNTERS = new Set(['errors', 'stuckLaunchesRecovered']);
+
+/**
  * EMF structured-log metric emission: one `console.log` JSON envelope per
- * sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`, carrying
- * only the counters that are nonzero, and nothing when all are. CloudWatch
- * bills a custom metric for every hour it has a data point, and these
- * counters are almost always 0; every alarm on them treats missing data as not
- * breaching, so an absent 0 reads the same as a reported one. Opt-in —
- * `emitEmf` writes nothing unless the runner set set
- * `GithubMicrovmRunnersProps.emitMetrics` (see `shared/emf.ts`'s gate).
+ * sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`. Every other
+ * counter is published only when nonzero: CloudWatch bills a custom metric for
+ * every hour it has a data point, these counters are almost always 0, and the
+ * alarms on them evaluate a single period with missing data not breaching, so
+ * an absent 0 reads the same as a reported one. Opt-in — `emitEmf` writes
+ * nothing unless the runner set set `GithubMicrovmRunnersProps.emitMetrics`
+ * (see `shared/emf.ts`'s gate).
  */
 function emitMetrics(ctx: JanitorContext): void {
   // `Metrics` is a fixed-field interface (no index signature); every field is
   // a number, so this is a safe structural cast to `Record<string, number>`.
-  const nonzero = Object.fromEntries(
+  const published = Object.fromEntries(
     Object.entries(ctx.metrics as unknown as Record<string, number>).filter(
-      ([, value]) => value !== 0,
+      ([name, value]) => value !== 0 || ALWAYS_PUBLISHED_COUNTERS.has(name),
     ),
   );
-  if (Object.keys(nonzero).length === 0) return;
   emitEmf({
     namespace: EMF_NAMESPACE,
     dimensions: ['RunnerSetId'],
     dimensionValues: { RunnerSetId: ctx.runnerSetId },
-    metrics: nonzero,
+    metrics: published,
     timestamp: ctx.nowMs,
   });
 }
