@@ -152,7 +152,7 @@ function renderToolchainLines(toolchains: RunnerToolchain[]): string[] {
       const dir = `/opt/hostedtoolcache/Python/${t.version}/arm64`;
       const minor = t.version.split('.').slice(0, 2).join('.'); // e.g. 3.12
       lines.push(
-        `RUN set -o pipefail; dnf install -y ${PYTHON_BUILD_DEPS.join(' ')} ` +
+        `RUN set -o pipefail; dnf install -y --setopt=tsflags=nodocs ${PYTHON_BUILD_DEPS.join(' ')} ` +
           `&& mkdir -p /tmp/py-${t.version} ` +
           `&& curl -fsSL https://www.python.org/ftp/python/${t.version}/Python-${t.version}.tar.xz ` +
           `| tar -xJ -C /tmp/py-${t.version} --strip-components=1 ` +
@@ -161,7 +161,7 @@ function renderToolchainLines(toolchains: RunnerToolchain[]): string[] {
           `&& make -j"$(nproc)" && make altinstall ` +
           `&& ln -sf python${minor} ${dir}/bin/python ` +
           `&& ln -sf python${minor} ${dir}/bin/python3 ` +
-          `&& cd / && rm -rf /tmp/py-${t.version} ` +
+          `&& cd / && rm -rf /tmp/py-${t.version} && dnf clean all ` +
           `&& touch /opt/hostedtoolcache/Python/${t.version}/arm64.complete`,
       );
     }
@@ -218,7 +218,10 @@ export function renderDockerfile(o: NormalizedImageOptions): string {
   return (
     [
       'FROM public.ecr.aws/lambda/microvms:al2023-minimal',
-      'RUN dnf install -y ' +
+      // Every VM start reads the image's snapshot, so every install skips docs
+      // and cleans its package cache: neither is used at job time, and both
+      // were read on every start (about 380 MB on a toolchain image).
+      'RUN dnf install -y --setopt=tsflags=nodocs ' +
         [...BASE_PACKAGES, ...systemPackages].join(' ') +
         ' && dnf clean all',
       // GitHub CLI, which GitHub-hosted runners ship and shared actions call.
@@ -228,7 +231,7 @@ export function renderDockerfile(o: NormalizedImageOptions): string {
       // `--repofrompath` ("Unknown option"); an earlier `|| true` hid that, so
       // every image shipped without gh. No `|| true`: a failed install must
       // fail the image build. Verified on al2023-minimal arm64, 2026-10-23.
-      'RUN curl -fsSLo /tmp/gh.asc https://cli.github.com/packages/githubcli-archive-keyring.asc && rpm --import /tmp/gh.asc && rm /tmp/gh.asc && curl -fsSLo /etc/yum.repos.d/gh-cli.repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install -y gh && dnf clean all',
+      'RUN curl -fsSLo /tmp/gh.asc https://cli.github.com/packages/githubcli-archive-keyring.asc && rpm --import /tmp/gh.asc && rm /tmp/gh.asc && curl -fsSLo /etc/yum.repos.d/gh-cli.repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install -y --setopt=tsflags=nodocs gh && dnf clean all',
       // AWS CLI v2 (ARM64). Baked in because it's a near-universal CI need —
       // ECR login (`aws ecr get-login-password`), `aws s3`/`sts`, and any job
       // that shells out to `aws` — and GitHub-hosted runners include it, so

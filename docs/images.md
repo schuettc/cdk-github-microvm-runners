@@ -98,7 +98,9 @@ RunnerImage.fromOptions({
 });
 ```
 
-- `systemPackages` — extra `dnf` packages alongside the base set.
+- `systemPackages` — extra `dnf` packages alongside the base set. Like the
+  base set, they are installed without their docs and man pages, because every
+  VM start reads the whole image.
 - `setupCommands` — extra `RUN` commands, in order, after packages, assets, and
   environment are laid down.
 - `assets` — files and directories copied into the image.

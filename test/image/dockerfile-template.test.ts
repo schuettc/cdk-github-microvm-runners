@@ -46,9 +46,28 @@ describe('renderDockerfile', () => {
       .filter((l) => /\bgh\b/.test(l));
 
     expect(ghLines).toEqual([
-      'RUN curl -fsSLo /tmp/gh.asc https://cli.github.com/packages/githubcli-archive-keyring.asc && rpm --import /tmp/gh.asc && rm /tmp/gh.asc && curl -fsSLo /etc/yum.repos.d/gh-cli.repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install -y gh && dnf clean all',
+      'RUN curl -fsSLo /tmp/gh.asc https://cli.github.com/packages/githubcli-archive-keyring.asc && rpm --import /tmp/gh.asc && rm /tmp/gh.asc && curl -fsSLo /etc/yum.repos.d/gh-cli.repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install -y --setopt=tsflags=nodocs gh && dnf clean all',
     ]);
     expect(ghLines[0]).not.toContain('|| true');
+  });
+
+  it('installs every package without docs and leaves no package cache behind', () => {
+    // Every VM start reads the image's snapshot, so docs and the package
+    // cache are paid for on every job. A Python toolchain adds its own
+    // install, so render one to cover that line too.
+    const installLines = renderDockerfile(
+      normalizeImageOptions({
+        toolchains: [RunnerToolchain.python('3.12.7')],
+      }),
+    )
+      .split('\n')
+      .filter((l) => l.includes('dnf install'));
+
+    expect(installLines).toHaveLength(3);
+    for (const line of installLines) {
+      expect(line).toMatch(/dnf install -y --setopt=tsflags=nodocs /);
+      expect(line).toMatch(/ && dnf clean all( && [^&]+)*$/);
+    }
   });
 
   it('matches the full default-render snapshot', () => {
