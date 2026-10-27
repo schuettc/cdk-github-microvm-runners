@@ -40,6 +40,11 @@ two shapes.
 
 **Per runner set**, dimensioned by `RunnerSetId`, the janitor emits one envelope
 per sweep. Two runner sets in the same account and region report separately.
+It carries only the counters that are nonzero, and the sweep emits nothing at
+all when every counter is 0: CloudWatch charges a custom metric for every hour
+it has a data point, and these counters are almost always 0. Read a missing
+value as 0, as the alarms below do; a graph of one shows gaps rather than a
+flat line at 0.
 
 | Accessor                          | Counts                                                              |
 | --------------------------------- | ------------------------------------------------------------------- |
@@ -59,21 +64,21 @@ per sweep. Two runner sets in the same account and region report separately.
 **Per runner class**, dimensioned by `RunnerSetId` and `SizeClass`, the launcher
 and warm pool emit one envelope per event. Each accessor takes the class label:
 
-| Accessor                        | Reports                                                      |
-| ------------------------------- | ------------------------------------------------------------ |
-| `warmHit(label)`                | launches served by a pre-booted VM                           |
-| `coldBoot(label)`               | launches that booted a new VM                                |
-| `capacityRejected(label)`       | launches refused because the account hit its quota           |
-| `cancelledBeforeLaunch(label)`  | launches skipped because the job had already stopped waiting |
-| `warmThrottled(label)`          | warm-path attempts that fell back to a cold boot             |
-| `warmSpinUpMs(label)`           | spin-up time on the warm path                                |
-| `coldSpinUpMs(label)`           | spin-up time on the cold path                                |
-| `poolCurrent(label)`            | VMs currently in the warm pool                               |
-| `poolTarget(label)`             | VMs the pool is converging toward                            |
-| `poolLaunched(label)`           | VMs a sweep added to the pool                                |
-| `poolLaunchFailed(label)`       | pool launches that failed                                    |
-| `oldestQueuedJobSeconds(label)` | seconds the class's oldest queued job has waited (0 if none) |
-| `queuedJobs(label)`             | jobs this class owns that are still queued                   |
+| Accessor                        | Reports                                                        |
+| ------------------------------- | -------------------------------------------------------------- |
+| `warmHit(label)`                | launches served by a pre-booted VM                             |
+| `coldBoot(label)`               | launches that booted a new VM                                  |
+| `capacityRejected(label)`       | launches refused because the account hit its quota             |
+| `cancelledBeforeLaunch(label)`  | launches skipped because the job had already stopped waiting   |
+| `warmThrottled(label)`          | warm-path attempts that fell back to a cold boot               |
+| `warmSpinUpMs(label)`           | spin-up time on the warm path                                  |
+| `coldSpinUpMs(label)`           | spin-up time on the cold path                                  |
+| `poolCurrent(label)`            | VMs currently in the warm pool                                 |
+| `poolTarget(label)`             | VMs the pool is converging toward                              |
+| `poolLaunched(label)`           | VMs a sweep added to the pool                                  |
+| `poolLaunchFailed(label)`       | pool launches that failed                                      |
+| `oldestQueuedJobSeconds(label)` | seconds the class's oldest queued job has waited (0 if none)   |
+| `queuedJobs(label)`             | jobs this class owns that are still queued (only when any are) |
 
 ```ts
 runners.metrics.capacityRejected('microvm');

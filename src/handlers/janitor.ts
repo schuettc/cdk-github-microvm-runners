@@ -1791,19 +1791,23 @@ function emitQueuedJobMetrics(
       namespace: EMF_NAMESPACE,
       dimensions: ['RunnerSetId', 'SizeClass'],
       dimensionValues: { RunnerSetId: ctx.runnerSetId, SizeClass: label },
+      // OldestQueuedJobSeconds every sweep, 0 included: `queuedJobAgeAlarm`
+      // treats its absence as the janitor having stopped. QueuedJobs only
+      // when a job is queued (see `emitMetrics` for why zeros are dropped).
       metrics: {
         OldestQueuedJobSeconds: state.oldestQueuedJobSeconds,
-        QueuedJobs: state.queuedJobs,
+        ...(state.queuedJobs > 0 ? { QueuedJobs: state.queuedJobs } : {}),
       },
       units: { OldestQueuedJobSeconds: 'Seconds' },
       timestamp: ctx.nowMs,
     });
   }
+  if (!truncated) return;
   emitEmf({
     namespace: EMF_NAMESPACE,
     dimensions: ['RunnerSetId'],
     dimensionValues: { RunnerSetId: ctx.runnerSetId },
-    metrics: { QueuedJobScanTruncated: truncated ? 1 : 0 },
+    metrics: { QueuedJobScanTruncated: 1 },
     timestamp: ctx.nowMs,
   });
 }
@@ -1903,16 +1907,30 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
   emitQueuedJobMetrics(ctx, states, budget.truncated);
 }
 
-/** EMF structured-log metric emission: one `console.log` JSON envelope per sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`. Opt-in — `emitEmf` writes nothing unless the runner set set `GithubMicrovmRunnersProps.emitMetrics` (see `shared/emf.ts`'s gate). */
+/**
+ * EMF structured-log metric emission: one `console.log` JSON envelope per
+ * sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`, carrying
+ * only the counters that are nonzero, and nothing when all are. CloudWatch
+ * bills a custom metric for every hour it has a data point, and these
+ * counters are almost always 0; every alarm on them treats missing data as not
+ * breaching, so an absent 0 reads the same as a reported one. Opt-in —
+ * `emitEmf` writes nothing unless the runner set set
+ * `GithubMicrovmRunnersProps.emitMetrics` (see `shared/emf.ts`'s gate).
+ */
 function emitMetrics(ctx: JanitorContext): void {
+  // `Metrics` is a fixed-field interface (no index signature); every field is
+  // a number, so this is a safe structural cast to `Record<string, number>`.
+  const nonzero = Object.fromEntries(
+    Object.entries(ctx.metrics as unknown as Record<string, number>).filter(
+      ([, value]) => value !== 0,
+    ),
+  );
+  if (Object.keys(nonzero).length === 0) return;
   emitEmf({
     namespace: EMF_NAMESPACE,
     dimensions: ['RunnerSetId'],
     dimensionValues: { RunnerSetId: ctx.runnerSetId },
-    // `Metrics` is a fixed-field interface (no index signature); every field
-    // is a number, so this is a safe structural cast to the generic emitter's
-    // `Record<string, number>` shape.
-    metrics: ctx.metrics as unknown as Record<string, number>,
+    metrics: nonzero,
     timestamp: ctx.nowMs,
   });
 }

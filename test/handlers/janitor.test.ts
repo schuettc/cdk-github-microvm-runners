@@ -1566,10 +1566,7 @@ describe('per-item error isolation', () => {
       expect.arrayContaining(['v1', 'v2']),
     );
 
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    const parsed = JSON.parse(emfLine as string) as {
+    const parsed = sweepCounters(logSpy) as {
       errors: number;
       imageVersionsPruned: number;
     };
@@ -1606,11 +1603,9 @@ describe('EMF metrics output', () => {
 
     await handler();
 
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    expect(emfLine).toBeDefined();
-    const parsed = JSON.parse(emfLine as string) as {
+    const envelopes = runnerSetEnvelopes(logSpy);
+    expect(envelopes).toHaveLength(1);
+    const parsed = envelopes[0] as unknown as {
       _aws: {
         CloudWatchMetrics: {
           Namespace: string;
@@ -1621,35 +1616,109 @@ describe('EMF metrics output', () => {
       RunnerSetId: string;
       suspectsCleared: number;
       lifetimeKills: number;
-      orphansReaped: number;
-      stuckRunnersReaped: number;
-      imageVersionsPruned: number;
-      tableRowsCleaned: number;
     };
 
     expect(parsed._aws.CloudWatchMetrics[0].Namespace).toBe('MicrovmRunners');
     expect(parsed._aws.CloudWatchMetrics[0].Dimensions).toEqual([
       ['RunnerSetId'],
     ]);
-    const metricNames = parsed._aws.CloudWatchMetrics[0].Metrics.map(
-      (m) => m.Name,
-    );
-    expect(metricNames).toEqual(
-      expect.arrayContaining([
-        'orphansReaped',
-        'stuckRunnersReaped',
-        'suspectsCleared',
-        'lifetimeKills',
-        'imageVersionsPruned',
-        'tableRowsCleaned',
-      ]),
-    );
+    expect(
+      parsed._aws.CloudWatchMetrics[0].Metrics.every((m) => m.Unit === 'Count'),
+    ).toBe(true);
     expect(parsed.RunnerSetId).toBe('x');
     expect(parsed.suspectsCleared).toBe(1);
     expect(parsed.lifetimeKills).toBe(1);
     logSpy.mockRestore();
   });
+
+  it('publishes only the counters that are nonzero', async () => {
+    // CloudWatch bills a metric for every hour it has a data point, and the
+    // counters are almost always 0. Every alarm on them treats missing data as
+    // not breaching, so an absent 0 reads the same as a reported one.
+    setRunnerSetVms([
+      { microvmId: 'mvm-busy' },
+      { microvmId: 'mvm-lifetime', ageSeconds: LIFETIME_CAP_SECONDS + 1 },
+    ]);
+    setTableRows([
+      normalRow({
+        runnerName: 'microvm-runner-x-busy0001',
+        microvmId: 'mvm-busy',
+        suspectSince: isoMinusSeconds(10),
+      }),
+      normalRow({
+        runnerName: 'microvm-runner-x-life0001',
+        microvmId: 'mvm-lifetime',
+      }),
+    ]);
+    listRunnersMock.mockResolvedValue([
+      githubRunner({ id: 1, name: 'microvm-runner-x-busy0001', busy: true }),
+    ]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    const counters = runnerSetEnvelopes(logSpy);
+    expect(counters).toHaveLength(1);
+    const names = (
+      counters[0]._aws as {
+        CloudWatchMetrics: { Metrics: { Name: string }[] }[];
+      }
+    ).CloudWatchMetrics[0].Metrics.map((m) => m.Name);
+    expect(names.sort()).toEqual(['lifetimeKills', 'suspectsCleared']);
+    expect(counters[0].orphansReaped).toBeUndefined();
+    logSpy.mockRestore();
+  });
+
+  it('publishes no counter envelope when every counter is zero', async () => {
+    setRunnerSetVms([]);
+    setTableRows([]);
+    listRunnersMock.mockResolvedValue([]);
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(runnerSetEnvelopes(logSpy)).toEqual([]);
+    logSpy.mockRestore();
+  });
 });
+
+/**
+ * The janitor's counters for one sweep, merged from its RunnerSetId-only
+ * envelopes. A counter that was 0 is not published, so a missing counter
+ * reads as 0 here, as it does to the alarms (missing data not breaching).
+ */
+function sweepCounters(
+  logSpy: ReturnType<typeof jest.spyOn>,
+): Record<string, number> {
+  const merged: Record<string, number> = Object.assign(
+    {},
+    ...runnerSetEnvelopes(logSpy),
+  );
+  return new Proxy(merged, {
+    get: (target, key) =>
+      typeof key === 'string' ? (target[key] ?? 0) : undefined,
+  });
+}
+
+/** EMF envelopes dimensioned by RunnerSetId alone: the janitor's counters and QueuedJobScanTruncated. */
+function runnerSetEnvelopes(
+  logSpy: ReturnType<typeof jest.spyOn>,
+): Record<string, unknown>[] {
+  return logSpy.mock.calls
+    .map((c: unknown[]) => c[0] as string)
+    .filter((l: string) => typeof l === 'string' && l.includes('"_aws"'))
+    .map((l: string) => JSON.parse(l) as Record<string, unknown>)
+    .filter((e) => {
+      const dims = (
+        e._aws as { CloudWatchMetrics: { Dimensions: string[][] }[] }
+      ).CloudWatchMetrics[0].Dimensions;
+      return JSON.stringify(dims) === JSON.stringify([['RunnerSetId']]);
+    });
+}
 
 describe('recoverStuckLaunches: DLQ recovery on control-plane outage recovery', () => {
   function enableRecovery(): void {
@@ -1743,10 +1812,7 @@ describe('recoverStuckLaunches: DLQ recovery on control-plane outage recovery', 
       1001,
     );
 
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    const parsed = JSON.parse(emfLine as string) as {
+    const parsed = sweepCounters(logSpy) as {
       stuckLaunchesRecovered: number;
       errors: number;
     };
@@ -1796,10 +1862,7 @@ describe('recoverStuckLaunches: DLQ recovery on control-plane outage recovery', 
     // Neither re-driven nor discarded — left for a later sweep.
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(0);
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    const parsed = JSON.parse(emfLine as string) as {
+    const parsed = sweepCounters(logSpy) as {
       stuckLaunchesRecovered: number;
       errors: number;
     };
@@ -1868,10 +1931,7 @@ describe('recoverStuckLaunches: DLQ recovery on control-plane outage recovery', 
     expect(getWorkflowJobMock).not.toHaveBeenCalled();
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(0);
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    const parsed = JSON.parse(emfLine as string) as { errors: number };
+    const parsed = sweepCounters(logSpy) as { errors: number };
     expect(parsed.errors).toBe(0);
     logSpy.mockRestore();
   });
@@ -1946,10 +2006,7 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
       // committed-claim relaunch carries relaunchAttempts=1 forward.
       relaunchAttempts: 1,
     });
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    const parsed = JSON.parse(emfLine as string) as {
+    const parsed = sweepCounters(logSpy) as {
       stuckClaimsRelaunched: number;
     };
     expect(parsed.stuckClaimsRelaunched).toBe(1);
@@ -1995,10 +2052,7 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
           l.includes('janitor: relaunch attempts exhausted'),
       );
     expect(raised).toBe(true);
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    const parsed = JSON.parse(emfLine as string) as {
+    const parsed = sweepCounters(logSpy) as {
       stuckClaimsRelaunched: number;
       unregisteredRelaunchExhausted: number;
     };
@@ -2143,10 +2197,7 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
 
     await expect(handler()).resolves.toBeUndefined();
 
-    const emfLine = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find((line) => line.includes('"_aws"') && line.includes('"errors"'));
-    const parsed = JSON.parse(emfLine as string) as {
+    const parsed = sweepCounters(logSpy) as {
       errors: number;
       stuckClaimsRelaunched: number;
     };
@@ -2229,15 +2280,7 @@ describe('recoverStuckLaunches: unregistered-reap relaunch (issue #48)', () => {
   function emitted(
     logSpy: ReturnType<typeof jest.spyOn>,
   ): Record<string, number> {
-    const line = logSpy.mock.calls
-      .map((c) => c[0] as string)
-      .find(
-        (l) =>
-          typeof l === 'string' &&
-          l.includes('"_aws"') &&
-          l.includes('"errors"'),
-      );
-    return JSON.parse(line as string) as Record<string, number>;
+    return sweepCounters(logSpy);
   }
 
   it('relaunches the still-queued job the moment its runner is reaped as unregistered, bounded by an attempt counter', async () => {
@@ -2666,8 +2709,11 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     expect(small?.OldestQueuedJobSeconds).toBe(900);
     expect(small?.QueuedJobs).toBe(2);
     const large = classEnvelope(logSpy, 'large');
+    // OldestQueuedJobSeconds is published every sweep, 0 included: the
+    // queued-age alarm treats its absence as the janitor having stopped.
+    // QueuedJobs is published only when there is a queued job.
     expect(large?.OldestQueuedJobSeconds).toBe(0);
-    expect(large?.QueuedJobs).toBe(0);
+    expect(large?.QueuedJobs).toBeUndefined();
     // Per-class envelope carries RunnerSetId + SizeClass, like launcher metrics.
     expect(small?.RunnerSetId).toBe(RUNNER_SET_ID);
     const meta = (
@@ -2754,7 +2800,7 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     // exactly resolveMatchedSizeClass in the launcher.
     expect(classEnvelope(logSpy, 'large')?.QueuedJobs).toBe(1);
     expect(classEnvelope(logSpy, 'large')?.OldestQueuedJobSeconds).toBe(720);
-    expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBe(0);
+    expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBeUndefined();
     logSpy.mockRestore();
   });
 
@@ -2777,8 +2823,8 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
 
     await handler();
 
-    expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBe(0);
-    expect(classEnvelope(logSpy, 'large')?.QueuedJobs).toBe(0);
+    expect(classEnvelope(logSpy, 'small')?.QueuedJobs).toBeUndefined();
+    expect(classEnvelope(logSpy, 'large')?.QueuedJobs).toBeUndefined();
     logSpy.mockRestore();
   });
 
@@ -3060,7 +3106,7 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     const microvm = classEnvelope(logSpy, 'microvm');
     expect(microvm?.QueuedJobs).toBe(101);
     expect(microvm?.OldestQueuedJobSeconds).toBe(3600);
-    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(0);
+    expect(truncatedEnvelope(logSpy)).toBeUndefined();
     logSpy.mockRestore();
   });
 
@@ -3109,11 +3155,11 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
 
     await handler();
 
-    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(0);
+    expect(truncatedEnvelope(logSpy)).toBeUndefined();
     logSpy.mockRestore();
   });
 
-  it('a clean sweep sets QueuedJobScanTruncated to 0', async () => {
+  it('a clean sweep publishes no QueuedJobScanTruncated', async () => {
     setEnv();
     setRepos([{ owner: 'acme', repo: 'widgets' }]);
     const logSpy = jest
@@ -3122,7 +3168,7 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
 
     await handler();
 
-    expect(truncatedEnvelope(logSpy)?.QueuedJobScanTruncated).toBe(0);
+    expect(truncatedEnvelope(logSpy)).toBeUndefined();
     logSpy.mockRestore();
   });
 
@@ -3176,10 +3222,8 @@ describe('queued-job-age measurement (queuedJobAgeAlarm backing)', () => {
     // No per-class queued-job envelopes emitted (nothing claims 0).
     expect(classEnvelope(logSpy, 'small')).toBeUndefined();
     expect(classEnvelope(logSpy, 'large')).toBeUndefined();
-    // The per-sweep envelope still reports, and its errors count is 0 \u2014 the
-    // skip is not an error.
-    const sweep = emfLines(logSpy).find((e) => e.errors !== undefined);
-    expect(sweep?.errors).toBe(0);
+    // The skip is not an error: errors stays 0 (and so is not published).
+    expect(sweepCounters(logSpy).errors).toBe(0);
     logSpy.mockRestore();
     errorSpy.mockRestore();
   });
