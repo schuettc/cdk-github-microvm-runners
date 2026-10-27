@@ -1666,22 +1666,23 @@ describe('EMF metrics output', () => {
         CloudWatchMetrics: { Metrics: { Name: string }[] }[];
       }
     ).CloudWatchMetrics[0].Metrics.map((m) => m.Name);
-    // errors and stuckLaunchesRecovered are always present (see the next test).
+    // The counters alarms read are always present (see the next test).
     expect(names.sort()).toEqual([
       'errors',
       'lifetimeKills',
       'stuckLaunchesRecovered',
+      'stuckRunnersReaped',
       'suspectsCleared',
     ]);
     expect(counters[0].orphansReaped).toBeUndefined();
     logSpy.mockRestore();
   });
 
-  it('always publishes the counters behind three-period alarms, zeros included, and nothing else when all are zero', async () => {
-    // sweepErrorsAlarm and stuckLaunchesRecoveredAlarm need 3 periods in a
-    // row. With a missing period CloudWatch reaches further back for real
-    // data points and ignores treatMissingData, so an error, a clean sweep,
-    // an error would alarm if the clean sweep's 0 were not published.
+  it('always publishes the counters alarms read, zeros included, and nothing else when all are zero', async () => {
+    // With a period missing, CloudWatch reaches back for older real data
+    // points and ignores treatMissingData: without the zeros a three-period
+    // alarm could fire on errors separated by clean sweeps, and a one-period
+    // alarm could stay in ALARM after its breach has passed.
     setRunnerSetVms([]);
     setTableRows([]);
     listRunnersMock.mockResolvedValue([]);
@@ -1698,9 +1699,14 @@ describe('EMF metrics output', () => {
         CloudWatchMetrics: { Metrics: { Name: string }[] }[];
       }
     ).CloudWatchMetrics[0].Metrics.map((m) => m.Name);
-    expect(names.sort()).toEqual(['errors', 'stuckLaunchesRecovered']);
+    expect(names.sort()).toEqual([
+      'errors',
+      'stuckLaunchesRecovered',
+      'stuckRunnersReaped',
+    ]);
     expect(counters[0].errors).toBe(0);
     expect(counters[0].stuckLaunchesRecovered).toBe(0);
+    expect(counters[0].stuckRunnersReaped).toBe(0);
     logSpy.mockRestore();
   });
 });

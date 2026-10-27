@@ -1908,21 +1908,25 @@ async function measureQueuedJobAge(ctx: JanitorContext): Promise<void> {
 }
 
 /**
- * Counters published every sweep, 0 included: the ones behind the library's
- * three-period alarms (`sweepErrorsAlarm`, `stuckLaunchesRecoveredAlarm`).
- * When a period is missing, CloudWatch reaches further back for real data
- * points and ignores `treatMissingData`, so an error, a clean sweep, an error
- * would alarm if the clean sweep's 0 were not published.
+ * Counters published every sweep, 0 included: the ones the library's alarms
+ * read (`sweepErrorsAlarm`, `stuckLaunchesRecoveredAlarm`,
+ * `stuckRunnersReapedAlarm`). When a period has no data point, CloudWatch
+ * reaches back for older real ones and ignores `treatMissingData`, so without
+ * the zeros an alarm could fire on breaches separated by clean sweeps, or stay
+ * in ALARM after the breach has passed.
  */
-const ALWAYS_PUBLISHED_COUNTERS = new Set(['errors', 'stuckLaunchesRecovered']);
+const ALWAYS_PUBLISHED_COUNTERS = new Set([
+  'errors',
+  'stuckLaunchesRecovered',
+  'stuckRunnersReaped',
+]);
 
 /**
  * EMF structured-log metric emission: one `console.log` JSON envelope per
  * sweep, namespace `MicrovmRunners`, dimensioned by `RunnerSetId`. Every other
  * counter is published only when nonzero: CloudWatch bills a custom metric for
- * every hour it has a data point, these counters are almost always 0, and the
- * alarms on them evaluate a single period with missing data not breaching, so
- * an absent 0 reads the same as a reported one. Opt-in — `emitEmf` writes
+ * every hour it has a data point, these counters are almost always 0, and no
+ * library alarm reads them. Opt-in — `emitEmf` writes
  * nothing unless the runner set set `GithubMicrovmRunnersProps.emitMetrics`
  * (see `shared/emf.ts`'s gate).
  */
