@@ -40,7 +40,7 @@ default.
 
 ```ts
 import { App, CfnOutput, Stack } from 'aws-cdk-lib';
-import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import {
   GithubAppId,
   GithubAppKey,
@@ -53,26 +53,26 @@ import {
 const app = new App();
 const stack = new Stack(app, 'Runners', { env: { region: 'us-east-1' } });
 
-const appId = Secret.fromSecretNameV2(
+const appId = StringParameter.fromSecureStringParameterAttributes(
   stack,
   'AppId',
-  'microvm-runner/dev/app-id',
+  { parameterName: '/microvm-runner/dev/app-id' },
 );
-const privateKey = Secret.fromSecretNameV2(
+const privateKey = StringParameter.fromSecureStringParameterAttributes(
   stack,
   'AppKey',
-  'microvm-runner/dev/app-private-key',
+  { parameterName: '/microvm-runner/dev/app-private-key' },
 );
-const webhookSecret = Secret.fromSecretNameV2(
+const webhookSecret = StringParameter.fromSecureStringParameterAttributes(
   stack,
   'WebhookSecret',
-  'microvm-runner/dev/webhook-secret',
+  { parameterName: '/microvm-runner/dev/webhook-secret' },
 );
 
 const runners = new GithubMicrovmRunners(stack, 'Runners', {
   github: GithubAuth.app({
-    appId: GithubAppId.fromSecret(appId),
-    privateKey: GithubAppKey.fromSecret(privateKey),
+    appId: GithubAppId.fromParameter(appId),
+    privateKey: GithubAppKey.fromParameter(privateKey),
     webhookSecret,
   }),
   scope: RunnerScope.org('my-org'),
@@ -85,8 +85,10 @@ new CfnOutput(stack, 'WebhookUrl', { value: runners.webhookUrl });
 new CfnOutput(stack, 'SetupCommand', { value: runners.setupCommand });
 ```
 
-The handlers read all three secrets at run time, which is why the stack can be
-deployed before the App exists.
+The three are SSM Parameter Store SecureString parameters. The handlers read
+them at run time, which is why the stack can be deployed before the App exists.
+CloudFormation cannot create a SecureString parameter, so the stack only
+references them by name; the setup command in the next step writes them.
 
 ## 2. Deploy
 
@@ -112,8 +114,9 @@ runners. A helper creates it through GitHub's App-manifest flow.
 The helper reads `WebhookUrl` from the deployed stack, creates the App pointed
 at that URL with the permissions the runners need (`actions: read` and
 organization `self-hosted runners: write`) and the `workflow_job`
-subscription, writes the App ID, private key, and webhook secret to Secrets
-Manager under `microvm-runner/dev`, and opens the install page. Install it
+subscription, writes the App ID, private key, and webhook secret to Parameter
+Store as SecureString parameters under `/microvm-runner/dev`, and opens the
+install page. Install it
 there, granting access to the repositories the runner set serves.
 
 It needs three things, which are the same three the stack was built with:
@@ -124,7 +127,8 @@ export STACK_NAME=Runners     # the CDK stack deployed above
 export AWS_REGION=us-east-1   # the region it was deployed to
 ```
 
-Then, with AWS credentials available:
+Then, with AWS credentials that can read the stack (`cloudformation:DescribeStacks`)
+and read and write the three parameters (`ssm:GetParameter`, `ssm:PutParameter`):
 
 ```bash
 npx cdk-github-microvm-runners setup \
@@ -142,19 +146,20 @@ stack's `SetupCommand` output — copy that instead if you would rather not set
 the variables:
 
 ```
-Runners.SetupCommand = npx cdk-github-microvm-runners@0.1 setup --org my-org --stack Runners --region us-east-1
+Runners.SetupCommand = npx cdk-github-microvm-runners@0.2 setup --org my-org --stack Runners --region us-east-1
 ```
 
 That is CloudFormation's output format: `Runners` is the stack, `SetupCommand`
 is the output name, and everything after `=` is the command.
 
-The command is safe to re-run. Every run reads the stored secrets and the
+The command is safe to re-run. Every run reads the stored parameters and the
 installation first and then does what is missing, so the same line finishes an
 interrupted setup and reports on a finished one. `--doctor` limits a run to that
 report, and `--help` lists every flag.
 
-Pass `--profile` to pick a named AWS profile. Pass `--secret-prefix` to write
-the secrets under a different prefix, and use the same prefix in the stack.
+Pass `--profile` to pick a named AWS profile. Pass `--parameter-prefix` to write
+the parameters under a different path (default `/microvm-runner/dev`), and use
+the same path in the stack.
 
 A runner set scoped to repositories rather than an organization prints
 `--account <login>` in place of `--org`. That App asks for repository
@@ -175,8 +180,14 @@ To create the App by hand instead, give it `actions: read` and organization
 `self-hosted runners: write` — or repository `Administration: write` for a
 runner set scoped to repositories — subscribe it to `workflow_job`, set its
 webhook URL to the stack's `WebhookUrl` and its webhook secret to a value you
-choose, then store the App ID, the private-key PEM, and that webhook secret
-under the three secret names the stack reads.
+choose, then store the App ID, the private-key PEM, and that webhook secret as
+SecureString parameters under the three names the stack reads, for example:
+
+```bash
+aws ssm put-parameter --type SecureString --name /microvm-runner/dev/app-id --value 123456
+aws ssm put-parameter --type SecureString --name /microvm-runner/dev/app-private-key --value file://app.pem
+aws ssm put-parameter --type SecureString --name /microvm-runner/dev/webhook-secret --value file://webhook-secret.txt
+```
 
 ## 4. Run a job on it
 

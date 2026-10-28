@@ -44,7 +44,6 @@
     "@aws-sdk/client-dynamodb": "^3.1133.0",
     "@aws-sdk/client-kms": "^3.1133.0",
     "@aws-sdk/client-lambda-microvms": "^3.1133.0",
-    "@aws-sdk/client-secrets-manager": "^3.1133.0",
     "@aws-sdk/client-sqs": "^3.1133.0",
     "@aws-sdk/client-ssm": "^3.1133.0",
     "@aws-sdk/util-dynamodb": "^3.996.9",

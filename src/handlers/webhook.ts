@@ -16,11 +16,8 @@
  * avoid cross-test leakage.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from '@aws-sdk/client-secrets-manager';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { RUNNER_NAME_PREFIX } from './shared/runner-naming.js';
 import { isRepoInScope, type ScopeConfig } from './shared/runner-set-config.js';
 
@@ -52,7 +49,7 @@ interface WorkflowJobPayload {
   };
 }
 
-const smClient = new SecretsManagerClient({});
+const ssmClient = new SSMClient({});
 const sqsClient = new SQSClient({});
 
 let cachedWebhookSecret: string | undefined;
@@ -72,15 +69,16 @@ function requireEnv(name: string): string {
 
 async function getWebhookSecret(): Promise<string> {
   if (cachedWebhookSecret === undefined) {
-    const res = await smClient.send(
-      new GetSecretValueCommand({
-        SecretId: requireEnv('GH_WEBHOOK_SECRET_ARN'),
+    const res = await ssmClient.send(
+      new GetParameterCommand({
+        Name: requireEnv('GH_WEBHOOK_SECRET_PARAMETER'),
+        WithDecryption: true,
       }),
     );
-    if (!res.SecretString) {
-      throw new Error('webhook: webhook secret has no SecretString');
+    if (!res.Parameter?.Value) {
+      throw new Error('webhook: webhook secret parameter has no value');
     }
-    cachedWebhookSecret = res.SecretString;
+    cachedWebhookSecret = res.Parameter.Value;
   }
   return cachedWebhookSecret;
 }

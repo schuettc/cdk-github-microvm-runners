@@ -1,17 +1,14 @@
 import { createHmac } from 'node:crypto';
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from '@aws-sdk/client-secrets-manager';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { mockClient } from 'aws-sdk-client-mock';
 import { _resetCachesForTesting, handler } from '../../src/handlers/webhook.js';
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
-const SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:1:secret:webhook';
+const WEBHOOK_SECRET_PARAMETER = '/microvm-runner/dev/webhook-secret';
 const QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/1/queue';
 
-const smMock = mockClient(SecretsManagerClient);
+const ssmMock = mockClient(SSMClient);
 const sqsMock = mockClient(SQSClient);
 
 const ORIGINAL_ENV = { ...process.env };
@@ -31,7 +28,7 @@ function resetEnv(): void {
 }
 
 function setEnv(overrides: Record<string, string> = {}): void {
-  process.env.GH_WEBHOOK_SECRET_ARN = SECRET_ARN;
+  process.env.GH_WEBHOOK_SECRET_PARAMETER = WEBHOOK_SECRET_PARAMETER;
   process.env.QUEUE_URL = QUEUE_URL;
   process.env.SIZE_CLASS_LABELS = JSON.stringify(['microvm', 'microvm-8gb']);
   // Every fixture below is under `acme`. Individual scope tests override this.
@@ -102,9 +99,14 @@ beforeEach(() => {
   resetEnv();
   setEnv();
   _resetCachesForTesting();
-  smMock.reset();
+  ssmMock.reset();
   sqsMock.reset();
-  smMock.on(GetSecretValueCommand).resolves({ SecretString: WEBHOOK_SECRET });
+  ssmMock
+    .on(GetParameterCommand, {
+      Name: WEBHOOK_SECRET_PARAMETER,
+      WithDecryption: true,
+    })
+    .resolves({ Parameter: { Value: WEBHOOK_SECRET } });
   sqsMock.on(SendMessageCommand).resolves({ MessageId: 'msg-1' });
 });
 
@@ -146,14 +148,32 @@ describe('signature verification', () => {
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
   });
 
-  it('fetches the webhook secret from Secrets Manager once and caches it', async () => {
+  it('verifies the signature against the webhook secret read from Parameter Store', async () => {
+    const body = workflowJobPayload({ action: 'queued' });
+
+    const good = await handler(makeEvent(body) as never);
+    const wrongKey = await handler(
+      makeEvent(body, {
+        signature: sign(body, 'not-the-stored-secret'),
+      }) as never,
+    );
+
+    expect(good.statusCode).toBe(200);
+    expect(wrongKey.statusCode).toBe(401);
+    expect(ssmMock.commandCalls(GetParameterCommand)[0].args[0].input).toEqual({
+      Name: WEBHOOK_SECRET_PARAMETER,
+      WithDecryption: true,
+    });
+  });
+
+  it('fetches the webhook secret from Parameter Store once and caches it', async () => {
     const body1 = workflowJobPayload({ action: 'queued' });
     const body2 = workflowJobPayload({ action: 'queued', id: 2002 });
 
     await handler(makeEvent(body1) as never);
     await handler(makeEvent(body2) as never);
 
-    expect(smMock.commandCalls(GetSecretValueCommand)).toHaveLength(1);
+    expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(1);
   });
 });
 

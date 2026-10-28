@@ -24,14 +24,18 @@ one.
 ```typescript
 const runnerSet = new GithubMicrovmRunners(stack, 'Runners', {
   github: GithubAuth.app({
-    appId: GithubAppId.fromSecret(
-      Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+    appId: GithubAppId.fromParameter(
+      StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+        parameterName: '/microvm-runner/dev/app-id',
+      }),
     ),
-    privateKey: GithubAppKey.fromSecret(
-      Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+    privateKey: GithubAppKey.fromParameter(
+      StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+        parameterName: '/microvm-runner/dev/app-private-key',
+      }),
     ),
-    webhookSecret: Secret.fromSecretNameV2(
-      stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+    webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+      stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
     ),
   }),
   scope: RunnerScope.org('my-org'),
@@ -683,9 +687,9 @@ const githubAppAuthProps: GithubAppAuthProps = { ... }
 
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
-| <code><a href="#cdk-github-microvm-runners.GithubAppAuthProps.property.appId">appId</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAppId">GithubAppId</a></code> | The GitHub App's numeric ID, as a literal or a Secrets Manager reference. |
-| <code><a href="#cdk-github-microvm-runners.GithubAppAuthProps.property.privateKey">privateKey</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAppKey">GithubAppKey</a></code> | The App's private key, backed by a secret or a KMS key. |
-| <code><a href="#cdk-github-microvm-runners.GithubAppAuthProps.property.webhookSecret">webhookSecret</a></code> | <code>aws-cdk-lib.aws_secretsmanager.ISecret</code> | Secret holding the webhook secret used to validate inbound deliveries. |
+| <code><a href="#cdk-github-microvm-runners.GithubAppAuthProps.property.appId">appId</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAppId">GithubAppId</a></code> | The GitHub App's numeric ID, as a literal or a parameter reference. |
+| <code><a href="#cdk-github-microvm-runners.GithubAppAuthProps.property.privateKey">privateKey</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAppKey">GithubAppKey</a></code> | The App's private key, backed by a parameter or a KMS key. |
+| <code><a href="#cdk-github-microvm-runners.GithubAppAuthProps.property.webhookSecret">webhookSecret</a></code> | <code>aws-cdk-lib.aws_ssm.IStringParameter</code> | SecureString parameter holding the webhook secret used to validate inbound deliveries. |
 
 ---
 
@@ -697,7 +701,7 @@ public readonly appId: GithubAppId;
 
 - *Type:* <a href="#cdk-github-microvm-runners.GithubAppId">GithubAppId</a>
 
-The GitHub App's numeric ID, as a literal or a Secrets Manager reference.
+The GitHub App's numeric ID, as a literal or a parameter reference.
 
 ---
 
@@ -709,19 +713,19 @@ public readonly privateKey: GithubAppKey;
 
 - *Type:* <a href="#cdk-github-microvm-runners.GithubAppKey">GithubAppKey</a>
 
-The App's private key, backed by a secret or a KMS key.
+The App's private key, backed by a parameter or a KMS key.
 
 ---
 
 ##### `webhookSecret`<sup>Required</sup> <a name="webhookSecret" id="cdk-github-microvm-runners.GithubAppAuthProps.property.webhookSecret"></a>
 
 ```typescript
-public readonly webhookSecret: ISecret;
+public readonly webhookSecret: IStringParameter;
 ```
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
-Secret holding the webhook secret used to validate inbound deliveries.
+SecureString parameter holding the webhook secret used to validate inbound deliveries.
 
 ---
 
@@ -890,7 +894,7 @@ public readonly encryptionKey: IKey;
 Customer-managed KMS key for this runner set's data at rest: the DynamoDB runner table, the SQS job queue and dead-letter queue, and any log group this construct creates.
 
 Log groups you bring yourself, and the GitHub
-secrets you pass in, keep their own keys.
+credential parameters you pass in, keep their own keys.
 
 ---
 
@@ -1233,32 +1237,32 @@ const githubPatAuthProps: GithubPatAuthProps = { ... }
 
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
-| <code><a href="#cdk-github-microvm-runners.GithubPatAuthProps.property.token">token</a></code> | <code>aws-cdk-lib.aws_secretsmanager.ISecret</code> | Secret holding a GitHub personal access token. |
-| <code><a href="#cdk-github-microvm-runners.GithubPatAuthProps.property.webhookSecret">webhookSecret</a></code> | <code>aws-cdk-lib.aws_secretsmanager.ISecret</code> | Secret holding the webhook secret used to validate inbound deliveries. |
+| <code><a href="#cdk-github-microvm-runners.GithubPatAuthProps.property.token">token</a></code> | <code>aws-cdk-lib.aws_ssm.IStringParameter</code> | SecureString parameter holding a GitHub personal access token. |
+| <code><a href="#cdk-github-microvm-runners.GithubPatAuthProps.property.webhookSecret">webhookSecret</a></code> | <code>aws-cdk-lib.aws_ssm.IStringParameter</code> | SecureString parameter holding the webhook secret used to validate inbound deliveries. |
 
 ---
 
 ##### `token`<sup>Required</sup> <a name="token" id="cdk-github-microvm-runners.GithubPatAuthProps.property.token"></a>
 
 ```typescript
-public readonly token: ISecret;
+public readonly token: IStringParameter;
 ```
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
-Secret holding a GitHub personal access token.
+SecureString parameter holding a GitHub personal access token.
 
 ---
 
 ##### `webhookSecret`<sup>Required</sup> <a name="webhookSecret" id="cdk-github-microvm-runners.GithubPatAuthProps.property.webhookSecret"></a>
 
 ```typescript
-public readonly webhookSecret: ISecret;
+public readonly webhookSecret: IStringParameter;
 ```
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
-Secret holding the webhook secret used to validate inbound deliveries.
+SecureString parameter holding the webhook secret used to validate inbound deliveries.
 
 ---
 
@@ -2002,21 +2006,23 @@ The group console output goes to, when one was passed to `ConsoleLogs.enabled()`
 
 ### GithubAppId <a name="GithubAppId" id="cdk-github-microvm-runners.GithubAppId"></a>
 
-Where a GitHub App's numeric ID comes from: a literal known at synth time, or a Secrets Manager secret read at runtime.
+Where a GitHub App's numeric ID comes from: a literal known at synth time, or an SSM SecureString parameter read at runtime.
 
-The secret form makes setup single-pass. A GitHub App can only be created
+The parameter form makes setup single-pass. A GitHub App can only be created
 once the runner set's webhook URL exists, so an App ID that has to be known
-at synth means deploying twice. Referencing the ID by secret, the way the
+at synth means deploying twice. Referencing the ID by parameter, the way the
 private key and webhook secret already are, lets you deploy, then create the
-App and write its ID into the secret, with no redeploy.
+App and write its ID into the parameter, with no redeploy.
 
 Build one with the static factories below; the constructor is private.
 
 *Example*
 
 ```typescript
-const appId = GithubAppId.fromSecret(
-  Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+const appId = GithubAppId.fromParameter(
+  StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+    parameterName: '/microvm-runner/dev/app-id',
+  }),
 );
 ```
 
@@ -2026,35 +2032,37 @@ const appId = GithubAppId.fromSecret(
 
 | **Name** | **Description** |
 | --- | --- |
-| <code><a href="#cdk-github-microvm-runners.GithubAppId.fromSecret">fromSecret</a></code> | The App ID is read at runtime from a Secrets Manager secret whose value is the numeric ID. |
+| <code><a href="#cdk-github-microvm-runners.GithubAppId.fromParameter">fromParameter</a></code> | The App ID is read at runtime from an SSM SecureString parameter whose value is the numeric ID. |
 | <code><a href="#cdk-github-microvm-runners.GithubAppId.fromValue">fromValue</a></code> | The App ID is a literal string known at synth time. |
 
 ---
 
-##### `fromSecret` <a name="fromSecret" id="cdk-github-microvm-runners.GithubAppId.fromSecret"></a>
+##### `fromParameter` <a name="fromParameter" id="cdk-github-microvm-runners.GithubAppId.fromParameter"></a>
 
 ```typescript
 import { GithubAppId } from 'cdk-github-microvm-runners'
 
-GithubAppId.fromSecret(secret: ISecret)
+GithubAppId.fromParameter(parameter: IStringParameter)
 ```
 
-The App ID is read at runtime from a Secrets Manager secret whose value is the numeric ID.
+The App ID is read at runtime from an SSM SecureString parameter whose value is the numeric ID.
 
-The secret need not exist at deploy time.
+The parameter need not exist at deploy time.
 
 *Example*
 
 ```typescript
-const appId = GithubAppId.fromSecret(
-  Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+const appId = GithubAppId.fromParameter(
+  StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+    parameterName: '/microvm-runner/dev/app-id',
+  }),
 );
 ```
 
 
-###### `secret`<sup>Required</sup> <a name="secret" id="cdk-github-microvm-runners.GithubAppId.fromSecret.parameter.secret"></a>
+###### `parameter`<sup>Required</sup> <a name="parameter" id="cdk-github-microvm-runners.GithubAppId.fromParameter.parameter.parameter"></a>
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
 ---
 
@@ -2085,20 +2093,20 @@ const appId = GithubAppId.fromValue('123456');
 
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
-| <code><a href="#cdk-github-microvm-runners.GithubAppId.property.secret">secret</a></code> | <code>aws-cdk-lib.aws_secretsmanager.ISecret</code> | The secret holding the ID, for an ID built with `fromSecret()`. |
+| <code><a href="#cdk-github-microvm-runners.GithubAppId.property.parameter">parameter</a></code> | <code>aws-cdk-lib.aws_ssm.IStringParameter</code> | The parameter holding the ID, for an ID built with `fromParameter()`. |
 | <code><a href="#cdk-github-microvm-runners.GithubAppId.property.value">value</a></code> | <code>string</code> | The literal ID, for an ID built with `fromValue()`. |
 
 ---
 
-##### `secret`<sup>Optional</sup> <a name="secret" id="cdk-github-microvm-runners.GithubAppId.property.secret"></a>
+##### `parameter`<sup>Optional</sup> <a name="parameter" id="cdk-github-microvm-runners.GithubAppId.property.parameter"></a>
 
 ```typescript
-public readonly secret: ISecret;
+public readonly parameter: IStringParameter;
 ```
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
-The secret holding the ID, for an ID built with `fromSecret()`.
+The parameter holding the ID, for an ID built with `fromParameter()`.
 
 ---
 
@@ -2117,15 +2125,17 @@ The literal ID, for an ID built with `fromValue()`.
 
 ### GithubAppKey <a name="GithubAppKey" id="cdk-github-microvm-runners.GithubAppKey"></a>
 
-Where a GitHub App's private key lives: a Secrets Manager secret holding the PEM, or a KMS key that signs the App's JWTs directly.
+Where a GitHub App's private key lives: an SSM SecureString parameter holding the PEM, or a KMS key that signs the App's JWTs directly.
 
 Build one with the static factories below; the constructor is private.
 
 *Example*
 
 ```typescript
-const privateKey = GithubAppKey.fromSecret(
-  Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+const privateKey = GithubAppKey.fromParameter(
+  StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+    parameterName: '/microvm-runner/dev/app-private-key',
+  }),
 );
 ```
 
@@ -2136,7 +2146,7 @@ const privateKey = GithubAppKey.fromSecret(
 | **Name** | **Description** |
 | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.GithubAppKey.fromKmsKey">fromKmsKey</a></code> | The App's private key lives in KMS and is used via `kms:Sign`. |
-| <code><a href="#cdk-github-microvm-runners.GithubAppKey.fromSecret">fromSecret</a></code> | The App's private key is stored as a PEM in Secrets Manager. |
+| <code><a href="#cdk-github-microvm-runners.GithubAppKey.fromParameter">fromParameter</a></code> | The App's private key is stored as a PEM in an SSM SecureString parameter, read at runtime with decryption. |
 
 ---
 
@@ -2171,28 +2181,30 @@ const privateKey = GithubAppKey.fromKmsKey(
 
 ---
 
-##### `fromSecret` <a name="fromSecret" id="cdk-github-microvm-runners.GithubAppKey.fromSecret"></a>
+##### `fromParameter` <a name="fromParameter" id="cdk-github-microvm-runners.GithubAppKey.fromParameter"></a>
 
 ```typescript
 import { GithubAppKey } from 'cdk-github-microvm-runners'
 
-GithubAppKey.fromSecret(secret: ISecret)
+GithubAppKey.fromParameter(parameter: IStringParameter)
 ```
 
-The App's private key is stored as a PEM in Secrets Manager.
+The App's private key is stored as a PEM in an SSM SecureString parameter, read at runtime with decryption.
 
 *Example*
 
 ```typescript
-const privateKey = GithubAppKey.fromSecret(
-  Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+const privateKey = GithubAppKey.fromParameter(
+  StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+    parameterName: '/microvm-runner/dev/app-private-key',
+  }),
 );
 ```
 
 
-###### `secret`<sup>Required</sup> <a name="secret" id="cdk-github-microvm-runners.GithubAppKey.fromSecret.parameter.secret"></a>
+###### `parameter`<sup>Required</sup> <a name="parameter" id="cdk-github-microvm-runners.GithubAppKey.fromParameter.parameter.parameter"></a>
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
 ---
 
@@ -2201,7 +2213,7 @@ const privateKey = GithubAppKey.fromSecret(
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.GithubAppKey.property.kmsKey">kmsKey</a></code> | <code>aws-cdk-lib.aws_kms.IKey</code> | The signing key, for a key built with `fromKmsKey()`. |
-| <code><a href="#cdk-github-microvm-runners.GithubAppKey.property.secret">secret</a></code> | <code>aws-cdk-lib.aws_secretsmanager.ISecret</code> | The secret holding the PEM, for a key built with `fromSecret()`. |
+| <code><a href="#cdk-github-microvm-runners.GithubAppKey.property.parameter">parameter</a></code> | <code>aws-cdk-lib.aws_ssm.IStringParameter</code> | The parameter holding the PEM, for a key built with `fromParameter()`. |
 
 ---
 
@@ -2217,22 +2229,22 @@ The signing key, for a key built with `fromKmsKey()`.
 
 ---
 
-##### `secret`<sup>Optional</sup> <a name="secret" id="cdk-github-microvm-runners.GithubAppKey.property.secret"></a>
+##### `parameter`<sup>Optional</sup> <a name="parameter" id="cdk-github-microvm-runners.GithubAppKey.property.parameter"></a>
 
 ```typescript
-public readonly secret: ISecret;
+public readonly parameter: IStringParameter;
 ```
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
-The secret holding the PEM, for a key built with `fromSecret()`.
+The parameter holding the PEM, for a key built with `fromParameter()`.
 
 ---
 
 
 ### GithubAuth <a name="GithubAuth" id="cdk-github-microvm-runners.GithubAuth"></a>
 
-How a runner set authenticates to GitHub: as a GitHub App, whose private key is backed by a secret or a KMS key, or with a personal access token.
+How a runner set authenticates to GitHub: as a GitHub App, whose private key is backed by a SecureString parameter or a KMS key, or with a personal access token.
 
 Either
 form also carries the webhook secret that inbound GitHub deliveries are
@@ -2244,14 +2256,18 @@ Build one with the static factories below; the constructor is private.
 
 ```typescript
 const auth = GithubAuth.app({
-  appId: GithubAppId.fromSecret(
-    Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+  appId: GithubAppId.fromParameter(
+    StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+      parameterName: '/microvm-runner/dev/app-id',
+    }),
   ),
-  privateKey: GithubAppKey.fromSecret(
-    Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+  privateKey: GithubAppKey.fromParameter(
+    StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+      parameterName: '/microvm-runner/dev/app-private-key',
+    }),
   ),
-  webhookSecret: Secret.fromSecretNameV2(
-    stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+  webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+    stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
   ),
 });
 ```
@@ -2261,8 +2277,8 @@ const auth = GithubAuth.app({
 
 | **Name** | **Description** |
 | --- | --- |
-| <code><a href="#cdk-github-microvm-runners.GithubAuth.bindEnv">bindEnv</a></code> | Serialize to the environment variables the runner set's handlers read: `GH_AUTH_KIND`, `GH_APP_ID` or `GH_APP_ID_SECRET_ARN`, `GH_KEY_SECRET_ARN` or `GH_KEY_KMS_ARN`, `GH_PAT_SECRET_ARN`, and `GH_WEBHOOK_SECRET_ARN`. |
-| <code><a href="#cdk-github-microvm-runners.GithubAuth.grantRead">grantRead</a></code> | Grant `grantee` read access to whichever credentials this auth carries: the App's secret-backed key and/or `kms:Sign` on its KMS key, plus its secret-backed App ID when one is used, or the PAT secret — plus, in every case, read access to the webhook secret. |
+| <code><a href="#cdk-github-microvm-runners.GithubAuth.bindEnv">bindEnv</a></code> | Serialize to the environment variables the runner set's handlers read: `GH_AUTH_KIND`, `GH_APP_ID` or `GH_APP_ID_PARAMETER`, `GH_KEY_PARAMETER` or `GH_KEY_KMS_ARN`, `GH_PAT_PARAMETER`, and `GH_WEBHOOK_SECRET_PARAMETER`. |
+| <code><a href="#cdk-github-microvm-runners.GithubAuth.grantRead">grantRead</a></code> | Grant `grantee` read access to whichever credentials this auth carries: the App's parameter-backed key and/or `kms:Sign` on its KMS key, plus its parameter-backed App ID when one is used, or the PAT parameter — plus, in every case, read access to the webhook secret. |
 | <code><a href="#cdk-github-microvm-runners.GithubAuth.grantReadWebhookSecret">grantReadWebhookSecret</a></code> | Grant `grantee` read access to the webhook secret, and nothing else. |
 
 ---
@@ -2273,9 +2289,11 @@ const auth = GithubAuth.app({
 public bindEnv(): {[ key: string ]: string}
 ```
 
-Serialize to the environment variables the runner set's handlers read: `GH_AUTH_KIND`, `GH_APP_ID` or `GH_APP_ID_SECRET_ARN`, `GH_KEY_SECRET_ARN` or `GH_KEY_KMS_ARN`, `GH_PAT_SECRET_ARN`, and `GH_WEBHOOK_SECRET_ARN`.
+Serialize to the environment variables the runner set's handlers read: `GH_AUTH_KIND`, `GH_APP_ID` or `GH_APP_ID_PARAMETER`, `GH_KEY_PARAMETER` or `GH_KEY_KMS_ARN`, `GH_PAT_PARAMETER`, and `GH_WEBHOOK_SECRET_PARAMETER`.
 
-Entries that do not apply are left out.
+Each `*_PARAMETER` holds a parameter NAME,
+which `ssm:GetParameter` takes as-is. Entries that do not apply are left
+out.
 
 ##### `grantRead` <a name="grantRead" id="cdk-github-microvm-runners.GithubAuth.grantRead"></a>
 
@@ -2283,7 +2301,16 @@ Entries that do not apply are left out.
 public grantRead(grantee: IGrantable): void
 ```
 
-Grant `grantee` read access to whichever credentials this auth carries: the App's secret-backed key and/or `kms:Sign` on its KMS key, plus its secret-backed App ID when one is used, or the PAT secret — plus, in every case, read access to the webhook secret.
+Grant `grantee` read access to whichever credentials this auth carries: the App's parameter-backed key and/or `kms:Sign` on its KMS key, plus its parameter-backed App ID when one is used, or the PAT parameter — plus, in every case, read access to the webhook secret.
+
+A parameter under the account's `aws/ssm` key needs no KMS grant. For one
+encrypted with a customer-managed KMS key, pass that key as
+`encryptionKey` when importing the parameter, so `kms:Decrypt` is granted
+too.
+
+Parameters are read by name, so they must be in the runner set's own
+account and region; parameters shared from another account are not
+supported.
 
 This is the full set, for a handler that has to act as the App. A handler
 that only verifies signatures wants {@link grantReadWebhookSecret}.
@@ -2345,14 +2372,18 @@ Authenticate as a GitHub App.
 
 ```typescript
 const auth = GithubAuth.app({
-  appId: GithubAppId.fromSecret(
-    Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+  appId: GithubAppId.fromParameter(
+    StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+      parameterName: '/microvm-runner/dev/app-id',
+    }),
   ),
-  privateKey: GithubAppKey.fromSecret(
-    Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+  privateKey: GithubAppKey.fromParameter(
+    StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+      parameterName: '/microvm-runner/dev/app-private-key',
+    }),
   ),
-  webhookSecret: Secret.fromSecretNameV2(
-    stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+  webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+    stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
   ),
 });
 ```
@@ -2378,9 +2409,11 @@ Authenticate with a personal access token.
 
 ```typescript
 const auth = GithubAuth.pat({
-  token: Secret.fromSecretNameV2(stack, 'Pat', 'microvm-runner/dev/token'),
-  webhookSecret: Secret.fromSecretNameV2(
-    stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+  token: StringParameter.fromSecureStringParameterAttributes(
+    stack, 'Pat', { parameterName: '/microvm-runner/dev/token' },
+  ),
+  webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+    stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
   ),
 });
 ```
@@ -2397,10 +2430,10 @@ const auth = GithubAuth.pat({
 | **Name** | **Type** | **Description** |
 | --- | --- | --- |
 | <code><a href="#cdk-github-microvm-runners.GithubAuth.property.kind">kind</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAuthKind">GithubAuthKind</a></code> | Whether this is App or personal-access-token authentication. |
-| <code><a href="#cdk-github-microvm-runners.GithubAuth.property.webhookSecret">webhookSecret</a></code> | <code>aws-cdk-lib.aws_secretsmanager.ISecret</code> | Secret holding the webhook secret inbound deliveries are validated against. |
+| <code><a href="#cdk-github-microvm-runners.GithubAuth.property.webhookSecret">webhookSecret</a></code> | <code>aws-cdk-lib.aws_ssm.IStringParameter</code> | Parameter holding the webhook secret inbound deliveries are validated against. |
 | <code><a href="#cdk-github-microvm-runners.GithubAuth.property.appId">appId</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAppId">GithubAppId</a></code> | The App's ID, for App authentication. |
 | <code><a href="#cdk-github-microvm-runners.GithubAuth.property.privateKey">privateKey</a></code> | <code><a href="#cdk-github-microvm-runners.GithubAppKey">GithubAppKey</a></code> | The App's private key, for App authentication. |
-| <code><a href="#cdk-github-microvm-runners.GithubAuth.property.token">token</a></code> | <code>aws-cdk-lib.aws_secretsmanager.ISecret</code> | The personal access token secret, for token authentication. |
+| <code><a href="#cdk-github-microvm-runners.GithubAuth.property.token">token</a></code> | <code>aws-cdk-lib.aws_ssm.IStringParameter</code> | The personal access token parameter, for token authentication. |
 
 ---
 
@@ -2419,12 +2452,12 @@ Whether this is App or personal-access-token authentication.
 ##### `webhookSecret`<sup>Required</sup> <a name="webhookSecret" id="cdk-github-microvm-runners.GithubAuth.property.webhookSecret"></a>
 
 ```typescript
-public readonly webhookSecret: ISecret;
+public readonly webhookSecret: IStringParameter;
 ```
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
-Secret holding the webhook secret inbound deliveries are validated against.
+Parameter holding the webhook secret inbound deliveries are validated against.
 
 ---
 
@@ -2455,12 +2488,12 @@ The App's private key, for App authentication.
 ##### `token`<sup>Optional</sup> <a name="token" id="cdk-github-microvm-runners.GithubAuth.property.token"></a>
 
 ```typescript
-public readonly token: ISecret;
+public readonly token: IStringParameter;
 ```
 
-- *Type:* aws-cdk-lib.aws_secretsmanager.ISecret
+- *Type:* aws-cdk-lib.aws_ssm.IStringParameter
 
-The personal access token secret, for token authentication.
+The personal access token parameter, for token authentication.
 
 ---
 

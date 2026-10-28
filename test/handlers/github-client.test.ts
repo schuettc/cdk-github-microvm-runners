@@ -4,10 +4,7 @@ import {
   verify as cryptoVerify,
 } from 'node:crypto';
 import { KMSClient, SignCommand } from '@aws-sdk/client-kms';
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from '@aws-sdk/client-secrets-manager';
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { mockClient } from 'aws-sdk-client-mock';
 import { fetch as undiciFetch, MockAgent } from 'undici';
 import {
@@ -31,7 +28,7 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', {
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 });
 
-const smMock = mockClient(SecretsManagerClient);
+const ssmMock = mockClient(SSMClient);
 const kmsMock = mockClient(KMSClient);
 
 let mockAgent: MockAgent;
@@ -49,18 +46,20 @@ function resetEnv(): void {
 /** PAT-kind env, used by every test that doesn't care about App-JWT auth. */
 function setPatEnv(): void {
   process.env.GH_AUTH_KIND = 'pat';
-  process.env.GH_PAT_SECRET_ARN =
-    'arn:aws:secretsmanager:us-east-1:1:secret:pat';
-  smMock.on(GetSecretValueCommand).resolves({ SecretString: 'ghp_thepat' });
+  process.env.GH_PAT_PARAMETER = '/microvm-runner/dev/pat';
+  ssmMock
+    .on(GetParameterCommand)
+    .resolves({ Parameter: { Value: 'ghp_thepat' } });
 }
 
-/** App-kind env with a secret-backed key, used by the JWT/install-flow tests. */
-function setAppSecretEnv(appId = '12345'): void {
+/** App-kind env with a parameter-backed key, used by the JWT/install-flow tests. */
+function setAppParameterEnv(appId = '12345'): void {
   process.env.GH_AUTH_KIND = 'app';
   process.env.GH_APP_ID = appId;
-  process.env.GH_KEY_SECRET_ARN =
-    'arn:aws:secretsmanager:us-east-1:1:secret:key';
-  smMock.on(GetSecretValueCommand).resolves({ SecretString: privateKey });
+  process.env.GH_KEY_PARAMETER = '/microvm-runner/dev/app-private-key';
+  ssmMock
+    .on(GetParameterCommand)
+    .resolves({ Parameter: { Value: privateKey } });
 }
 
 /** Mocks GET /app/installations (per_page=100&page=1) to return exactly one installation. */
@@ -121,7 +120,7 @@ function decodeJwt(bearer: string | undefined): {
 beforeEach(() => {
   resetEnv();
   _resetCachesForTesting();
-  smMock.reset();
+  ssmMock.reset();
   kmsMock.reset();
   mockAgent = new MockAgent();
   mockAgent.disableNetConnect();
@@ -141,9 +140,9 @@ afterEach(async () => {
   resetEnv();
 });
 
-describe('getInstallationToken — app kind, secret-backed key', () => {
+describe('getInstallationToken — app kind, parameter-backed key', () => {
   it('signs a valid RS256 JWT (iss = app id, exp - iat <= 600) to fetch the installation token', async () => {
-    setAppSecretEnv();
+    setAppParameterEnv();
     let capturedAuth: string | undefined;
     interceptSingleInstallation(555);
     interceptAccessTokenExchange(
@@ -176,7 +175,7 @@ describe('getInstallationToken — app kind, secret-backed key', () => {
   });
 
   it('caches the installation token until 5 minutes before expiry (no re-fetch)', async () => {
-    setAppSecretEnv();
+    setAppParameterEnv();
     interceptSingleInstallation(555);
     interceptAccessTokenExchange(555, {
       token: 'ghs_cached',
@@ -192,7 +191,7 @@ describe('getInstallationToken — app kind, secret-backed key', () => {
   });
 
   it('re-fetches a new token once within 5 minutes of expiry, reusing the cached installation id', async () => {
-    setAppSecretEnv();
+    setAppParameterEnv();
     // Only ONE /app/installations interceptor is registered: the
     // installation id must be cached and reused across the two token
     // fetches below, not re-discovered.
@@ -213,42 +212,42 @@ describe('getInstallationToken — app kind, secret-backed key', () => {
   });
 });
 
-describe('getInstallationToken — app id from Secrets Manager', () => {
-  const APP_ID_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:1:secret:app-id';
-  const KEY_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:1:secret:key';
+describe('getInstallationToken — app id from Parameter Store', () => {
+  const APP_ID_PARAMETER = '/microvm-runner/dev/app-id';
+  const KEY_PARAMETER = '/microvm-runner/dev/app-private-key';
 
-  /** App-kind env whose numeric id is a secret reference, not a literal. */
-  function setAppIdSecretEnv(storedAppId: string): void {
+  /** App-kind env whose numeric id is a parameter reference, not a literal. */
+  function setAppIdParameterEnv(storedAppId: string): void {
     process.env.GH_AUTH_KIND = 'app';
-    process.env.GH_APP_ID_SECRET_ARN = APP_ID_SECRET_ARN;
-    process.env.GH_KEY_SECRET_ARN = KEY_SECRET_ARN;
-    smMock
-      .on(GetSecretValueCommand, { SecretId: APP_ID_SECRET_ARN })
-      .resolves({ SecretString: storedAppId });
-    smMock
-      .on(GetSecretValueCommand, { SecretId: KEY_SECRET_ARN })
-      .resolves({ SecretString: privateKey });
+    process.env.GH_APP_ID_PARAMETER = APP_ID_PARAMETER;
+    process.env.GH_KEY_PARAMETER = KEY_PARAMETER;
+    ssmMock
+      .on(GetParameterCommand, { Name: APP_ID_PARAMETER, WithDecryption: true })
+      .resolves({ Parameter: { Value: storedAppId } });
+    ssmMock
+      .on(GetParameterCommand, { Name: KEY_PARAMETER, WithDecryption: true })
+      .resolves({ Parameter: { Value: privateKey } });
   }
 
-  it('resolves the app id from GH_APP_ID_SECRET_ARN into the JWT iss claim', async () => {
-    setAppIdSecretEnv('778899');
+  it('resolves the app id from GH_APP_ID_PARAMETER into the JWT iss claim', async () => {
+    setAppIdParameterEnv('778899');
     let capturedAuth: string | undefined;
     interceptSingleInstallation(555);
     interceptAccessTokenExchange(
       555,
-      { token: 'ghs_secret_id', expiresAt: new Date(Date.now() + 3600_000) },
+      { token: 'ghs_parameter_id', expiresAt: new Date(Date.now() + 3600_000) },
       (bearer) => {
         capturedAuth = bearer;
       },
     );
 
     const token = await getInstallationToken({ org: 'acme' });
-    expect(token).toBe('ghs_secret_id');
+    expect(token).toBe('ghs_parameter_id');
     expect(decodeJwt(capturedAuth).payload.iss).toBe('778899');
   });
 
   it('trims surrounding whitespace/newlines from the stored app id', async () => {
-    setAppIdSecretEnv('778899\n');
+    setAppIdParameterEnv('778899\n');
     let capturedAuth: string | undefined;
     interceptSingleInstallation(555);
     interceptAccessTokenExchange(
@@ -263,8 +262,8 @@ describe('getInstallationToken — app id from Secrets Manager', () => {
     expect(decodeJwt(capturedAuth).payload.iss).toBe('778899');
   });
 
-  it('caches the app id across JWT builds (single GetSecretValue for it)', async () => {
-    setAppIdSecretEnv('778899');
+  it('reads the App ID and key with GetParameter WithDecryption', async () => {
+    setAppIdParameterEnv('778899');
     interceptSingleInstallation(555);
     // Two token fetches: the second is forced by an almost-expired first token,
     // so a second JWT — and therefore a second app-id resolution — is built.
@@ -280,14 +279,22 @@ describe('getInstallationToken — app id from Secrets Manager', () => {
     await getInstallationToken({ org: 'acme' });
     await getInstallationToken({ org: 'acme' });
 
-    const appIdCalls = smMock
-      .commandCalls(GetSecretValueCommand)
-      .filter((call) => call.args[0].input.SecretId === APP_ID_SECRET_ARN);
-    expect(appIdCalls).toHaveLength(1);
+    // One read per name across both mints: the id and the key are cached for
+    // the execution environment, and each read asks SSM to decrypt.
+    const inputs = ssmMock
+      .commandCalls(GetParameterCommand)
+      .map((call) => call.args[0].input);
+    expect(inputs).toHaveLength(2);
+    expect(inputs).toEqual(
+      expect.arrayContaining([
+        { Name: APP_ID_PARAMETER, WithDecryption: true },
+        { Name: KEY_PARAMETER, WithDecryption: true },
+      ]),
+    );
   });
 
-  it('prefers a literal GH_APP_ID and never calls Secrets Manager for the id', async () => {
-    setAppIdSecretEnv('778899');
+  it('prefers a literal GH_APP_ID and never calls Parameter Store for the id', async () => {
+    setAppIdParameterEnv('778899');
     process.env.GH_APP_ID = '12345';
     let capturedAuth: string | undefined;
     interceptSingleInstallation(555);
@@ -301,19 +308,21 @@ describe('getInstallationToken — app id from Secrets Manager', () => {
 
     await getInstallationToken({ org: 'acme' });
     expect(decodeJwt(capturedAuth).payload.iss).toBe('12345');
-    const appIdCalls = smMock
-      .commandCalls(GetSecretValueCommand)
-      .filter((call) => call.args[0].input.SecretId === APP_ID_SECRET_ARN);
+    const appIdCalls = ssmMock
+      .commandCalls(GetParameterCommand)
+      .filter((call) => call.args[0].input.Name === APP_ID_PARAMETER);
     expect(appIdCalls).toHaveLength(0);
   });
 
-  it('throws when app kind sets neither GH_APP_ID nor GH_APP_ID_SECRET_ARN', async () => {
+  it('throws when app kind sets neither GH_APP_ID nor GH_APP_ID_PARAMETER', async () => {
     process.env.GH_AUTH_KIND = 'app';
-    process.env.GH_KEY_SECRET_ARN = KEY_SECRET_ARN;
-    smMock.on(GetSecretValueCommand).resolves({ SecretString: privateKey });
+    process.env.GH_KEY_PARAMETER = KEY_PARAMETER;
+    ssmMock
+      .on(GetParameterCommand)
+      .resolves({ Parameter: { Value: privateKey } });
 
     await expect(getInstallationToken({ org: 'acme' })).rejects.toThrow(
-      /neither GH_APP_ID nor GH_APP_ID_SECRET_ARN/,
+      /neither GH_APP_ID nor GH_APP_ID_PARAMETER/,
     );
   });
 });
@@ -364,7 +373,7 @@ describe('getInstallationToken — app kind, KMS-backed key', () => {
 });
 
 describe('getInstallationToken — pat kind', () => {
-  it('returns the PAT from Secrets Manager and caches it (single GetSecretValue call)', async () => {
+  it('returns the PAT from Parameter Store and caches it (single GetParameter call)', async () => {
     setPatEnv();
 
     const first = await getInstallationToken({ org: 'acme' });
@@ -372,7 +381,11 @@ describe('getInstallationToken — pat kind', () => {
 
     expect(first).toBe('ghp_thepat');
     expect(second).toBe('ghp_thepat');
-    expect(smMock.commandCalls(GetSecretValueCommand)).toHaveLength(1);
+    expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(1);
+    expect(ssmMock.commandCalls(GetParameterCommand)[0].args[0].input).toEqual({
+      Name: '/microvm-runner/dev/pat',
+      WithDecryption: true,
+    });
   });
 });
 
@@ -390,18 +403,18 @@ describe('getInstallationToken — misconfiguration guards', () => {
     );
   });
 
-  it('throws when app kind has neither GH_KEY_SECRET_ARN nor GH_KEY_KMS_ARN', async () => {
+  it('throws when app kind has neither GH_KEY_PARAMETER nor GH_KEY_KMS_ARN', async () => {
     process.env.GH_AUTH_KIND = 'app';
     process.env.GH_APP_ID = '1';
     interceptSingleInstallation(1);
 
     await expect(getInstallationToken({ org: 'acme' })).rejects.toThrow(
-      /neither GH_KEY_SECRET_ARN nor GH_KEY_KMS_ARN/,
+      /neither GH_KEY_PARAMETER nor GH_KEY_KMS_ARN/,
     );
   });
 
   it('throws a clear error naming the owner and listing available logins when no installation matches', async () => {
-    setAppSecretEnv('1');
+    setAppParameterEnv('1');
     pool
       .intercept({
         path: '/app/installations?per_page=100&page=1',
@@ -415,7 +428,7 @@ describe('getInstallationToken — misconfiguration guards', () => {
   });
 
   it('throws the same clear error when the App has zero installations at all', async () => {
-    setAppSecretEnv('1');
+    setAppParameterEnv('1');
     pool
       .intercept({
         path: '/app/installations?per_page=100&page=1',
@@ -429,7 +442,7 @@ describe('getInstallationToken — misconfiguration guards', () => {
   });
 
   it('selects the installation whose account.login matches the target org case-insensitively, among multiple installations', async () => {
-    setAppSecretEnv('1');
+    setAppParameterEnv('1');
     pool
       .intercept({
         path: '/app/installations?per_page=100&page=1',
@@ -449,7 +462,7 @@ describe('getInstallationToken — misconfiguration guards', () => {
   });
 
   it('caches installation id and token PER OWNER LOGIN, not process-global (two owners -> two token fetches, second call per owner cached)', async () => {
-    setAppSecretEnv('1');
+    setAppParameterEnv('1');
     pool
       .intercept({
         path: '/app/installations?per_page=100&page=1',
@@ -482,14 +495,13 @@ describe('getInstallationToken — misconfiguration guards', () => {
     // fetching a fresh token for the second, distinct owner.
   });
 
-  it('throws when the secret has no SecretString', async () => {
+  it('throws when the parameter has no value', async () => {
     process.env.GH_AUTH_KIND = 'pat';
-    process.env.GH_PAT_SECRET_ARN =
-      'arn:aws:secretsmanager:us-east-1:1:secret:pat';
-    smMock.on(GetSecretValueCommand).resolves({});
+    process.env.GH_PAT_PARAMETER = '/microvm-runner/dev/pat';
+    ssmMock.on(GetParameterCommand).resolves({});
 
     await expect(getInstallationToken({ org: 'acme' })).rejects.toThrow(
-      /no SecretString/,
+      /has no value/,
     );
   });
 

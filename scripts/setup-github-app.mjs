@@ -5,7 +5,7 @@
 // once), but the App Manifest flow lets us pre-fill EVERYTHING and reduce the
 // whole thing to two clicks with zero copy-paste.
 //
-// Every run starts by reading the three secrets and the installation, and then
+// Every run starts by reading the three parameters and the installation, and then
 // does only what is missing (see planFromState below), so the same command is
 // first-time setup, a health check, and a diagnosis. When nothing is stored yet
 // it:
@@ -14,7 +14,7 @@
 //   3. opens a pre-filled "Create GitHub App" page in your browser,
 //   4. catches GitHub's redirect on localhost and exchanges the one-time code
 //      for the App id, private key, and (GitHub-generated) webhook secret,
-//   5. writes all three to Secrets Manager,
+//   5. writes all three to SSM Parameter Store as SecureString parameters,
 //   6. opens the install page, and
 //   7. verifies the INSTALLATION (not just the App) has the right permissions
 //      and event subscription — the two-truths trap that silently breaks setup.
@@ -28,8 +28,8 @@
 // Run it with --help for the flags. That text lives in printHelp() below so
 // there is one copy of it.
 //
-// Node 18+ (uses global fetch). Depends only on @aws-sdk/client-secretsmanager
-// and @aws-sdk/client-cloudformation (both already in the package).
+// Node 18+ (uses global fetch). Depends only on @aws-sdk/client-ssm and
+// @aws-sdk/client-cloudformation (both already in the package).
 
 import { spawn } from 'node:child_process';
 import { createSign, randomBytes } from 'node:crypto';
@@ -71,7 +71,7 @@ function printHelp() {
   TypeScript or Python project. From a clone of this repository it is
   node scripts/setup-github-app.mjs with the same flags.
 
-  Every run reads the stored secrets and the App installation first, then does
+  Every run reads the stored parameters and the App installation first, then does
   what is missing: it creates the App when nothing is stored, says what is
   missing when some of it is, and prints a summary when the setup is complete.
   Re-running it is safe.
@@ -91,12 +91,13 @@ function printHelp() {
     --webhook-url <url>   Use this webhook URL and skip the stack lookup.
 
   AWS
-    --region <region>     Region holding the stack and the secrets.
+    --region <region>     Region holding the stack and the parameters.
                           Default: $AWS_REGION, else us-east-1
     --profile <name>      Named AWS profile to use for both.
-    --secret-prefix <p>   Secrets Manager name prefix for the app-id,
-                          app-private-key, and webhook-secret values.
-                          Default: microvm-runner/dev
+    --parameter-prefix <p>
+                          SSM Parameter Store path for the app-id,
+                          app-private-key, and webhook-secret SecureString
+                          parameters. Default: /microvm-runner/dev
 
   GitHub App
     --app-name <name>     Name GitHub gives the App. GitHub requires it to be
@@ -106,7 +107,7 @@ function printHelp() {
                           App is being created. Default: 8722
 
   Reporting
-    --doctor              Report on the stored secrets, the installation
+    --doctor              Report on the stored parameters, the installation
                           permissions, and the webhook endpoint, and create
                           nothing. A plain run prints the same report once the
                           setup is complete.
@@ -117,7 +118,7 @@ function printHelp() {
 // ---------------------------------------------------------------- account mode
 // The organization and personal-account flows differ in exactly three places,
 // and all three are data. Everything else — the manifest POST, the local
-// redirect catcher, the code exchange, the secret writes, the verification
+// redirect catcher, the code exchange, the parameter writes, the verification
 // read — is identical.
 export function accountMode(args) {
   const org = args.org;
@@ -164,7 +165,7 @@ export function planFromState(state) {
   if (!state.webhookSecret) missing.push('webhook secret');
 
   if (missing.length === 3) {
-    return { action: 'create', reason: 'no App secrets are present' };
+    return { action: 'create', reason: 'no App parameters are present' };
   }
   if (missing.length > 0) {
     return { action: 'repair', reason: `missing ${missing.join(', ')}` };
@@ -177,17 +178,17 @@ export function planFromState(state) {
   }
   return {
     action: 'ok',
-    reason: 'App, secrets, and installation are in place',
+    reason: 'App, parameters, and installation are in place',
   };
 }
 
 const args = parseArgs(process.argv.slice(2));
 const STACK = args.stack;
 const REGION = args.region || process.env.AWS_REGION || 'us-east-1';
-const SECRET_PREFIX = (args['secret-prefix'] || 'microvm-runner/dev').replace(
-  /\/+$/,
-  '',
-);
+// SSM hierarchy names start with `/`; add it when the caller left it off.
+const PARAMETER_PREFIX = (args['parameter-prefix'] || '/microvm-runner/dev')
+  .replace(/^\/*/, '/')
+  .replace(/\/+$/, '');
 const APP_NAME = args['app-name'] || 'microvm-runner';
 const PORT = Number(args.port || 8722);
 
@@ -324,57 +325,57 @@ async function verifyInstallation(mode, appId, pem, attempts = 30) {
   };
 }
 
-// ---------------------------------------------------------------- secrets
-async function storeSecrets({ appId, pem, webhookSecret }) {
-  const { SecretsManagerClient, CreateSecretCommand, PutSecretValueCommand } =
-    await import('@aws-sdk/client-secrets-manager');
-  const sm = new SecretsManagerClient({ region: REGION });
+// ---------------------------------------------------------------- parameters
+// SecureString under the account's aws/ssm key. CloudFormation cannot create a
+// SecureString parameter, which is why this script writes them rather than the
+// construct. Version 1 is a parameter this call created.
+async function storeParameters({ appId, pem, webhookSecret }) {
+  const { SSMClient, PutParameterCommand } =
+    await import('@aws-sdk/client-ssm');
+  const ssm = new SSMClient({ region: REGION });
   const put = async (name, value) => {
-    try {
-      await sm.send(
-        new CreateSecretCommand({ Name: name, SecretString: value }),
-      );
-      return 'created';
-    } catch (e) {
-      if (e?.name === 'ResourceExistsException') {
-        await sm.send(
-          new PutSecretValueCommand({ SecretId: name, SecretString: value }),
-        );
-        return 'updated';
-      }
-      throw e;
-    }
+    const res = await ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        Value: value,
+        Type: 'SecureString',
+        Overwrite: true,
+      }),
+    );
+    return res.Version === 1 ? 'created' : 'updated';
   };
-  const r1 = await put(`${SECRET_PREFIX}/app-id`, String(appId));
-  const r2 = await put(`${SECRET_PREFIX}/app-private-key`, pem);
-  const r3 = await put(`${SECRET_PREFIX}/webhook-secret`, webhookSecret);
+  const r1 = await put(`${PARAMETER_PREFIX}/app-id`, String(appId));
+  const r2 = await put(`${PARAMETER_PREFIX}/app-private-key`, pem);
+  const r3 = await put(`${PARAMETER_PREFIX}/webhook-secret`, webhookSecret);
   return { r1, r2, r3 };
 }
 
-// ---------------------------------------------------------------- secrets read
-async function readSecret(name) {
-  const { SecretsManagerClient, GetSecretValueCommand } =
-    await import('@aws-sdk/client-secrets-manager');
-  const sm = new SecretsManagerClient({ region: REGION });
-  const res = await sm.send(new GetSecretValueCommand({ SecretId: name }));
-  return res.SecretString;
+// ---------------------------------------------------------------- parameters read
+async function readParameter(name) {
+  const { SSMClient, GetParameterCommand } =
+    await import('@aws-sdk/client-ssm');
+  const ssm = new SSMClient({ region: REGION });
+  const res = await ssm.send(
+    new GetParameterCommand({ Name: name, WithDecryption: true }),
+  );
+  return res.Parameter?.Value;
 }
 
-// An absent secret is a state the planner reads, so a missing one comes back
+// An absent parameter is a state the planner reads, so a missing one comes back
 // as null; every other failure (denied, throttled, wrong region) still throws.
-async function readSecretOrNull(name) {
+async function readParameterOrNull(name) {
   try {
-    return (await readSecret(name)) ?? null;
+    return (await readParameter(name)) ?? null;
   } catch (e) {
-    if (e?.name === 'ResourceNotFoundException') return null;
+    if (e?.name === 'ParameterNotFound') return null;
     throw e;
   }
 }
 
 // ---------------------------------------------------------------- current state
-// The three secrets the runner set reads, and how to put each one back by hand
-// when only that one is gone.
-const SECRETS = [
+// The three parameters the runner set reads, and how to put each one back by
+// hand when only that one is gone.
+const PARAMETERS = [
   {
     field: 'appId',
     label: 'app ID',
@@ -402,8 +403,10 @@ const SECRETS = [
 // Read everything the plan depends on before deciding anything.
 async function readState(mode) {
   const state = {};
-  for (const s of SECRETS) {
-    state[s.field] = await readSecretOrNull(`${SECRET_PREFIX}/${s.suffix}`);
+  for (const s of PARAMETERS) {
+    state[s.field] = await readParameterOrNull(
+      `${PARAMETER_PREFIX}/${s.suffix}`,
+    );
   }
   if (state.appId) state.appId = state.appId.trim();
   // The installation is only worth reading once the App can be authenticated
@@ -418,18 +421,18 @@ async function readState(mode) {
 }
 
 // ---------------------------------------------------------------- report
-// What the setup looks like right now: which secrets are stored, whether the
+// What the setup looks like right now: which parameters are stored, whether the
 // installation carries the permissions and the event (the two-truths trap), and
 // whether the webhook endpoint answers an unsigned request with a 401.
 async function report(mode, state) {
   console.log(
-    `\n  Checking ${mode.label} setup (secrets ${SECRET_PREFIX}, region ${REGION})\n`,
+    `\n  Checking ${mode.label} setup (parameters ${PARAMETER_PREFIX}, region ${REGION})\n`,
   );
-  for (const s of SECRETS) {
+  for (const s of PARAMETERS) {
     console.log(
       state[s.field]
-        ? `  ✓ ${SECRET_PREFIX}/${s.suffix} stored`
-        : `  ✗ ${SECRET_PREFIX}/${s.suffix} absent`,
+        ? `  ✓ ${PARAMETER_PREFIX}/${s.suffix} stored`
+        : `  ✗ ${PARAMETER_PREFIX}/${s.suffix} absent`,
     );
   }
   if (state.installationVerified === true) {
@@ -467,22 +470,22 @@ async function report(mode, state) {
 // Print the one missing piece and the way to put it back.
 function printRepair(mode, state, plan) {
   console.error(`\n  ✗ ${plan.reason}\n`);
-  const gone = SECRETS.filter((s) => !state[s.field]);
+  const gone = PARAMETERS.filter((s) => !state[s.field]);
   if (gone.length > 0) {
     console.error(
-      `  An App is already recorded under ${SECRET_PREFIX}, so creating a` +
+      `  An App is already recorded under ${PARAMETER_PREFIX}, so creating a` +
         ` second one would leave two Apps pointed at the same runner set.\n`,
     );
     for (const s of gone) {
       console.error(`  ${s.label} — ${s.repair}:`);
       console.error(
-        `    aws secretsmanager put-secret-value --region ${REGION} \\\n` +
-          `      --secret-id ${SECRET_PREFIX}/${s.suffix} --secret-string <value>`,
+        `    aws ssm put-parameter --region ${REGION} --type SecureString --overwrite \\\n` +
+          `      --name ${PARAMETER_PREFIX}/${s.suffix} --value <value>`,
       );
     }
     console.error(`\n  The App settings live at ${mode.appsUrl}.`);
     console.error(
-      `  To start over instead, delete ${SECRET_PREFIX}/{${SECRETS.map(
+      `  To start over instead, delete ${PARAMETER_PREFIX}/{${PARAMETERS.map(
         (s) => s.suffix,
       ).join(',')}} and run this command again.\n`,
     );
@@ -508,7 +511,7 @@ async function createApp(mode) {
 
   console.log(`\n  Runner set webhook URL:  ${webhookUrl}`);
   console.log(`  GitHub target:      ${mode.label}`);
-  console.log(`  Secrets prefix:     ${SECRET_PREFIX} (region ${REGION})\n`);
+  console.log(`  Parameter prefix:   ${PARAMETER_PREFIX} (region ${REGION})\n`);
 
   const conversion = await new Promise((resolve, reject) => {
     const server = createServer(async (req, res) => {
@@ -583,9 +586,9 @@ async function createApp(mode) {
     die('conversion response missing id/pem/webhook_secret — cannot continue.');
 
   console.log(`  App created: ${conversion.name} (id ${appId})`);
-  const stored = await storeSecrets({ appId, pem, webhookSecret });
+  const stored = await storeParameters({ appId, pem, webhookSecret });
   console.log(
-    `  Secrets ${SECRET_PREFIX}/{app-id,app-private-key,webhook-secret}: ${stored.r1}/${stored.r2}/${stored.r3}\n`,
+    `  Parameters ${PARAMETER_PREFIX}/{app-id,app-private-key,webhook-secret}: ${stored.r1}/${stored.r2}/${stored.r3}\n`,
   );
 
   // Install click.

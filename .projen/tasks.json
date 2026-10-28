@@ -405,7 +405,7 @@
             "--peer",
             "--no-deprecated",
             "--dep=dev,prod,peer,optional",
-            "--filter=@aws-sdk/client-cloudformation,@aws-sdk/client-dynamodb,@aws-sdk/client-kms,@aws-sdk/client-lambda-microvms,@aws-sdk/client-secrets-manager,@aws-sdk/client-sqs,@aws-sdk/client-ssm,@aws-sdk/util-dynamodb,@types/aws-lambda,@types/jest,aws-sdk-client-mock,esbuild,eslint-config-prettier,eslint-import-resolver-typescript,eslint-plugin-import,eslint-plugin-prettier,jest,jsii-diff,jsii-pacmak,prettier,projen,ts-jest,ts-node,tsx,undici,yaml"
+            "--filter=@aws-sdk/client-cloudformation,@aws-sdk/client-dynamodb,@aws-sdk/client-kms,@aws-sdk/client-lambda-microvms,@aws-sdk/client-sqs,@aws-sdk/client-ssm,@aws-sdk/util-dynamodb,@types/aws-lambda,@types/jest,aws-sdk-client-mock,esbuild,eslint-config-prettier,eslint-import-resolver-typescript,eslint-plugin-import,eslint-plugin-prettier,jest,jsii-diff,jsii-pacmak,prettier,projen,ts-jest,ts-node,tsx,undici,yaml"
           ]
         },
         {
@@ -419,7 +419,6 @@
             "@aws-sdk/client-dynamodb",
             "@aws-sdk/client-kms",
             "@aws-sdk/client-lambda-microvms",
-            "@aws-sdk/client-secrets-manager",
             "@aws-sdk/client-sqs",
             "@aws-sdk/client-ssm",
             "@aws-sdk/util-dynamodb",
