@@ -283,6 +283,24 @@ function vmAgeSeconds(vm: RunnerSetVm, nowMs: number): number {
   return (nowMs - vm.startedAt.getTime()) / 1000;
 }
 
+/**
+ * How long a VM has been serving its job, for the lifetime backstop: since the
+ * launcher's mapping row was written (`launchedAt`, when the job claimed the
+ * VM), or the VM's own age when it has no such row. For a cold VM the two are
+ * seconds apart; for a warm VM `startedAt` is when the pool launched it, which
+ * can be hours earlier, so measuring from it killed warm VMs mid-job (#84).
+ */
+function lifetimeAgeSeconds(
+  vm: RunnerSetVm,
+  row: RunnerRow | undefined,
+  nowMs: number,
+): number {
+  const vmAge = vmAgeSeconds(vm, nowMs);
+  const claimedMs = row?.launchedAt ? Date.parse(row.launchedAt) : NaN;
+  if (Number.isNaN(claimedMs)) return vmAge;
+  return Math.min(vmAge, (nowMs - claimedMs) / 1000);
+}
+
 async function scanRunnerTable(
   tableName: string,
   consistentRead = false,
@@ -527,7 +545,8 @@ function logReap(params: {
 
 /**
  * Rule 4 — lifetime backstop: applies to every RUNNING VM regardless of
- * runner/row state. The platform's own `maximumDurationInSeconds` cap (job
+ * runner/row state, measured from when the VM was claimed for its job (see
+ * {@link lifetimeAgeSeconds}). The platform's own `maximumDurationInSeconds` cap (job
  * duration + 300s grace, set at launch) "should" have already fired by this
  * threshold; this is backstop-of-backstop. No runner to check — exception
  * to the fresh-getRunner-before-kill rule. Returns `true` if it killed the
@@ -796,7 +815,9 @@ async function reconcileRunningVm(
 ): Promise<void> {
   const age = vmAgeSeconds(vm, ctx.nowMs);
 
-  if (await tryLifetimeKill(ctx, vm, row, age)) {
+  if (
+    await tryLifetimeKill(ctx, vm, row, lifetimeAgeSeconds(vm, row, ctx.nowMs))
+  ) {
     return;
   }
   if (!row || isOrphanRow(row)) {
