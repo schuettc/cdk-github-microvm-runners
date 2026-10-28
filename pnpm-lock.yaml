@@ -20,9 +20,6 @@ importers:
       '@aws-sdk/client-lambda-microvms':
         specifier: ^3.1133.0
         version: 3.1133.0
-      '@aws-sdk/client-secrets-manager':
-        specifier: ^3.1133.0
-        version: 3.1133.0
       '@aws-sdk/client-sqs':
         specifier: ^3.1133.0
         version: 3.1133.0
@@ -152,10 +149,6 @@ packages:
 
   '@aws-sdk/client-lambda-microvms@3.1133.0':
     resolution: {integrity: sha512-P+1Oa1+Bg8I1u+OoIpm7RlOgxBzY1wWhIczvF8XvUH/qJNCpMmev04UTjYTPCOUhUMFWFrmJ5ZWBKpGZwvFCZg==}
-    engines: {node: '>=20.0.0'}
-
-  '@aws-sdk/client-secrets-manager@3.1133.0':
-    resolution: {integrity: sha512-j9hy5YWHZUNktppFRVCYIgrhi30J+kGgBASVxf6PRkSpg4yL/q/k6hG91hYecXVoRTsrcVXxweLyB+Dgd7NG9Q==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-sqs@3.1133.0':
@@ -3685,17 +3678,6 @@ snapshots:
       tslib: 2.8.1
 
   '@aws-sdk/client-lambda-microvms@3.1133.0':
-    dependencies:
-      '@aws-sdk/core': 3.978.0
-      '@aws-sdk/credential-provider-node': 3.972.83
-      '@aws-sdk/types': 3.974.5
-      '@smithy/core': 3.34.1
-      '@smithy/fetch-http-handler': 5.8.0
-      '@smithy/node-http-handler': 4.12.1
-      '@smithy/types': 4.18.0
-      tslib: 2.8.1
-
-  '@aws-sdk/client-secrets-manager@3.1133.0':
     dependencies:
       '@aws-sdk/core': 3.978.0
       '@aws-sdk/credential-provider-node': 3.972.83

@@ -3,8 +3,9 @@
  *
  * Handler-internal — NOT exported from `src/index.ts`. Reads the env-var
  * contract produced by `GithubAuth.bindEnv()` (`src/types/github-auth.ts`):
- * `GH_AUTH_KIND` ('app'|'pat'), `GH_APP_ID` | `GH_APP_ID_SECRET_ARN`,
- * `GH_KEY_SECRET_ARN` | `GH_KEY_KMS_ARN`, `GH_PAT_SECRET_ARN`.
+ * `GH_AUTH_KIND` ('app'|'pat'), `GH_APP_ID` | `GH_APP_ID_PARAMETER`,
+ * `GH_KEY_PARAMETER` | `GH_KEY_KMS_ARN`, `GH_PAT_PARAMETER`. Each
+ * `*_PARAMETER` is an SSM SecureString parameter name.
  *
  * All HTTP goes through the global `fetch` (Node 22, undici-backed) so tests
  * can mock it with undici's `MockAgent` + `setGlobalDispatcher`.
@@ -15,10 +16,7 @@
  */
 import { sign as rsaSign } from 'node:crypto';
 import { KMSClient, SignCommand } from '@aws-sdk/client-kms';
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from '@aws-sdk/client-secrets-manager';
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const USER_AGENT = 'cdk-github-microvm-runners';
@@ -94,7 +92,7 @@ export class RetryableError extends Error {
   }
 }
 
-const smClient = new SecretsManagerClient({});
+const ssmClient = new SSMClient({});
 const kmsClient = new KMSClient({});
 
 let cachedAppId: string | undefined;
@@ -138,20 +136,20 @@ function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64url');
 }
 
-async function fetchSecretString(secretArn: string): Promise<string> {
-  const res = await smClient.send(
-    new GetSecretValueCommand({ SecretId: secretArn }),
+async function fetchParameterValue(name: string): Promise<string> {
+  const res = await ssmClient.send(
+    new GetParameterCommand({ Name: name, WithDecryption: true }),
   );
-  if (!res.SecretString) {
-    throw new Error(`github-client: secret ${secretArn} has no SecretString`);
+  if (!res.Parameter?.Value) {
+    throw new Error(`github-client: parameter ${name} has no value`);
   }
-  return res.SecretString;
+  return res.Parameter.Value;
 }
 
 /**
  * Resolve the App's numeric ID from whichever env var the construct set:
- * `GH_APP_ID` (literal, baked in at synth) or `GH_APP_ID_SECRET_ARN` (a
- * Secrets Manager reference read here at runtime, so the App can be created
+ * `GH_APP_ID` (literal, baked in at synth) or `GH_APP_ID_PARAMETER` (a
+ * SecureString parameter read here at runtime, so the App can be created
  * after the runner set is deployed). Cached for the lifetime of the execution
  * environment, exactly like the PEM.
  *
@@ -169,26 +167,26 @@ async function getAppId(): Promise<string> {
     return cachedAppId;
   }
 
-  const secretArn = process.env.GH_APP_ID_SECRET_ARN;
-  if (!secretArn) {
+  const parameterName = process.env.GH_APP_ID_PARAMETER;
+  if (!parameterName) {
     throw new Error(
-      'github-client: neither GH_APP_ID nor GH_APP_ID_SECRET_ARN is set for app auth',
+      'github-client: neither GH_APP_ID nor GH_APP_ID_PARAMETER is set for app auth',
     );
   }
-  cachedAppId = (await fetchSecretString(secretArn)).trim();
+  cachedAppId = (await fetchParameterValue(parameterName)).trim();
   return cachedAppId;
 }
 
 async function getPem(): Promise<string> {
   if (cachedPem === undefined) {
-    cachedPem = await fetchSecretString(requireEnv('GH_KEY_SECRET_ARN'));
+    cachedPem = await fetchParameterValue(requireEnv('GH_KEY_PARAMETER'));
   }
   return cachedPem;
 }
 
 async function getPat(): Promise<string> {
   if (cachedPat === undefined) {
-    cachedPat = await fetchSecretString(requireEnv('GH_PAT_SECRET_ARN'));
+    cachedPat = await fetchParameterValue(requireEnv('GH_PAT_PARAMETER'));
   }
   return cachedPat;
 }
@@ -220,7 +218,7 @@ async function signWithConfiguredKey(signingInput: string): Promise<string> {
     return base64url(Buffer.from(res.Signature));
   }
 
-  if (process.env.GH_KEY_SECRET_ARN) {
+  if (process.env.GH_KEY_PARAMETER) {
     const pem = await getPem();
     return base64url(
       rsaSign('RSA-SHA256', Buffer.from(signingInput, 'utf8'), pem),
@@ -228,7 +226,7 @@ async function signWithConfiguredKey(signingInput: string): Promise<string> {
   }
 
   throw new Error(
-    'github-client: neither GH_KEY_SECRET_ARN nor GH_KEY_KMS_ARN is set for app auth',
+    'github-client: neither GH_KEY_PARAMETER nor GH_KEY_KMS_ARN is set for app auth',
   );
 }
 

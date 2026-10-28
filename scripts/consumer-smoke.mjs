@@ -132,7 +132,7 @@ try {
   writeFileSync(
     join(work, 'app.ts'),
     `import { App, CfnOutput, Stack } from 'aws-cdk-lib';
-import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import {
   GithubMicrovmRunners, GithubAppId, GithubAppKey, GithubAuth,
   RunnerScope, MicrovmSize,
@@ -140,13 +140,14 @@ import {
 
 const app = new App({ outdir: 'cdk.out' });
 const stack = new Stack(app, 'Runners', { env: { region: 'us-east-1' } });
-const sec = (id: string, name: string) => Secret.fromSecretNameV2(stack, id, name);
+const param = (id: string, name: string) =>
+  StringParameter.fromSecureStringParameterAttributes(stack, id, { parameterName: name });
 
 const runners = new GithubMicrovmRunners(stack, 'Runners', {
   github: GithubAuth.app({
-    appId: GithubAppId.fromSecret(sec('AppId', 'p/app-id')),
-    privateKey: GithubAppKey.fromSecret(sec('AppKey', 'p/app-private-key')),
-    webhookSecret: sec('WebhookSecret', 'p/webhook-secret'),
+    appId: GithubAppId.fromParameter(param('AppId', '/p/app-id')),
+    privateKey: GithubAppKey.fromParameter(param('AppKey', '/p/app-private-key')),
+    webhookSecret: param('WebhookSecret', '/p/webhook-secret'),
   }),
   scope: RunnerScope.org('my-org'),
 });

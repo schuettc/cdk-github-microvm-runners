@@ -196,7 +196,6 @@ const project = new awscdk.AwsCdkConstructLibrary({
     '@aws-sdk/client-dynamodb',
     '@aws-sdk/client-kms',
     '@aws-sdk/client-lambda-microvms',
-    '@aws-sdk/client-secrets-manager',
     '@aws-sdk/client-sqs',
     '@aws-sdk/client-ssm',
     '@aws-sdk/util-dynamodb',

@@ -20,7 +20,7 @@
 //     import.meta), target node22, platform node, ARM-safe (no native deps).
 //
 // The setup CLI is bundled for the same reason the handlers are: it imports
-// @aws-sdk/client-cloudformation and @aws-sdk/client-secrets-manager, both
+// @aws-sdk/client-cloudformation and @aws-sdk/client-ssm, both
 // devDependencies, and the published package carries no runtime dependencies
 // beyond its peers. Unbundled it would install cleanly and fail on first use.
 import { buildSync } from 'esbuild';

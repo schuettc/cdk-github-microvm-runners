@@ -4,7 +4,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { ManagedPolicy, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
-import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import {
   GithubMicrovmRunners,
   type GithubMicrovmRunnersProps,
@@ -33,11 +33,18 @@ function newStack(app: App = newApp(), region = 'us-east-1'): Stack {
   });
 }
 
-/** A fresh `GithubAuth.pat(...)` bound to unique secrets under `idPrefix`, so callers can build multiple auths in one stack without id collisions. */
+/** A SecureString parameter imported by name; its name is `/test/<id>`, so a policy that grants it names the id. */
+function param(stack: Stack, id: string) {
+  return StringParameter.fromSecureStringParameterAttributes(stack, id, {
+    parameterName: `/test/${id}`,
+  });
+}
+
+/** A fresh `GithubAuth.pat(...)` bound to unique parameters under `idPrefix`, so callers can build multiple auths in one stack without id collisions. */
 function patAuth(stack: Stack, idPrefix = ''): GithubAuth {
   return GithubAuth.pat({
-    token: new Secret(stack, `${idPrefix}PatToken`),
-    webhookSecret: new Secret(stack, `${idPrefix}WebhookSecret`),
+    token: param(stack, `${idPrefix}PatToken`),
+    webhookSecret: param(stack, `${idPrefix}WebhookSecret`),
   });
 }
 
@@ -77,7 +84,7 @@ function mkRunners(
 
 /** Expected `requireEnv`/`numEnv`(no-default) keys per handler — hardcoded from a direct read of each handler's source (see task-11-report.md's env cross-check evidence), NOT re-derived from the construct under test. */
 const WEBHOOK_REQUIRED_ENV = [
-  'GH_WEBHOOK_SECRET_ARN', // webhook.ts getWebhookSecret()
+  'GH_WEBHOOK_SECRET_PARAMETER', // webhook.ts getWebhookSecret()
   'QUEUE_URL', // webhook.ts sendQueueMessage()
   'SIZE_CLASS_LABELS', // webhook.ts readSizeClassLabels()
 ];
@@ -93,7 +100,7 @@ const LAUNCHER_REQUIRED_ENV = [
   'IMAGE_ARN', // launcher.ts resolveImageArn() fallback
   'LOGGING_JSON', // launcher.ts handleLaunch() -> readLogging()
   'GH_AUTH_KIND', // shared/github-client.ts getInstallationToken()
-  'GH_PAT_SECRET_ARN', // shared/github-client.ts getPat() (pat-kind auth)
+  'GH_PAT_PARAMETER', // shared/github-client.ts getPat() (pat-kind auth)
 ];
 const JANITOR_REQUIRED_ENV = [
   'RUNNER_SET_ID', // janitor.ts buildContext()
@@ -102,7 +109,7 @@ const JANITOR_REQUIRED_ENV = [
   'SIZE_CLASSES_JSON', // janitor.ts readSizeClasses()
   'MAX_JOB_DURATION_SECONDS', // janitor.ts buildContext() — numEnv with no default
   'GH_AUTH_KIND', // shared/github-client.ts getInstallationToken()
-  'GH_PAT_SECRET_ARN', // shared/github-client.ts getPat() (pat-kind auth)
+  'GH_PAT_PARAMETER', // shared/github-client.ts getPat() (pat-kind auth)
 ];
 
 describe('GithubMicrovmRunners: minimal instantiation', () => {
@@ -587,8 +594,8 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
     >;
   }
 
-  /** How many IAM policies grant `secretsmanager:GetSecretValue` on a resource mentioning `logicalIdPrefix`. */
-  function policiesGrantingSecretRead(
+  /** How many IAM policies grant `ssm:GetParameter` on a resource mentioning `logicalIdPrefix`. */
+  function policiesGrantingParameterRead(
     template: Template,
     logicalIdPrefix: string,
   ): number {
@@ -603,18 +610,18 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
           (statement) =>
             ([] as string[])
               .concat(statement.Action)
-              .includes('secretsmanager:GetSecretValue') &&
+              .includes('ssm:GetParameter') &&
             JSON.stringify(statement.Resource).includes(logicalIdPrefix),
         ),
     ).length;
   }
 
   /**
-   * Which handlers hold secretsmanager:GetSecretValue on a secret, by name.
+   * Which handlers hold ssm:GetParameter on a parameter, by name.
    * A count alone cannot tell "the webhook lost it" from "the janitor did",
    * and which one holds a credential is the whole security property here.
    */
-  function handlersGrantedSecretRead(
+  function handlersGrantedParameterRead(
     template: Template,
     logicalIdPrefix: string,
   ): string[] {
@@ -629,7 +636,7 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
           (statement) =>
             ([] as string[])
               .concat(statement.Action)
-              .includes('secretsmanager:GetSecretValue') &&
+              .includes('ssm:GetParameter') &&
             JSON.stringify(statement.Resource).includes(logicalIdPrefix),
         ),
       )
@@ -641,13 +648,13 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
     return [...new Set(roles)].sort();
   }
 
-  it('GithubAppId.fromValue bakes GH_APP_ID into every handler and sets no secret ref', () => {
+  it('GithubAppId.fromValue bakes GH_APP_ID into every handler and sets no parameter ref', () => {
     const stack = newStack();
     mkRunners(stack, 'Runners', {
       github: GithubAuth.app({
         appId: GithubAppId.fromValue('123456'),
-        privateKey: GithubAppKey.fromSecret(new Secret(stack, 'AppKey')),
-        webhookSecret: new Secret(stack, 'WebhookSecret'),
+        privateKey: GithubAppKey.fromParameter(param(stack, 'AppKey')),
+        webhookSecret: param(stack, 'WebhookSecret'),
       }),
       scope: RunnerScope.org('my-org'),
     });
@@ -656,17 +663,17 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
     for (const handler of HANDLERS) {
       const env = envFor(template, handler);
       expect(env.GH_APP_ID).toBe('123456');
-      expect(env.GH_APP_ID_SECRET_ARN).toBeUndefined();
+      expect(env.GH_APP_ID_PARAMETER).toBeUndefined();
     }
   });
 
-  it('GithubAppId.fromSecret sets GH_APP_ID_SECRET_ARN (a CFN intrinsic) on every handler and no literal GH_APP_ID', () => {
+  it('GithubAppId.fromParameter sets GH_APP_ID_PARAMETER (the parameter name) on every handler and no literal GH_APP_ID', () => {
     const stack = newStack();
     mkRunners(stack, 'Runners', {
       github: GithubAuth.app({
-        appId: GithubAppId.fromSecret(new Secret(stack, 'AppIdSecret')),
-        privateKey: GithubAppKey.fromSecret(new Secret(stack, 'AppKey')),
-        webhookSecret: new Secret(stack, 'WebhookSecret'),
+        appId: GithubAppId.fromParameter(param(stack, 'AppIdSecret')),
+        privateKey: GithubAppKey.fromParameter(param(stack, 'AppKey')),
+        webhookSecret: param(stack, 'WebhookSecret'),
       }),
       scope: RunnerScope.org('my-org'),
     });
@@ -675,20 +682,18 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
     for (const handler of HANDLERS) {
       const env = envFor(template, handler);
       expect(env.GH_APP_ID).toBeUndefined();
-      // A resolved CFN reference to the secret, not a synth-time literal.
-      expect(env.GH_APP_ID_SECRET_ARN).toEqual({
-        Ref: expect.stringMatching(/^AppIdSecret/),
-      });
+      // The parameter's name, which GetParameter takes and the grant matches.
+      expect(env.GH_APP_ID_PARAMETER).toBe('/test/AppIdSecret');
     }
   });
 
-  it('grants every GitHub-authenticating handler secretsmanager:GetSecretValue on the app-id secret', () => {
+  it('grants every GitHub-authenticating handler ssm:GetParameter on the app-id parameter', () => {
     const stack = newStack();
     mkRunners(stack, 'Runners', {
       github: GithubAuth.app({
-        appId: GithubAppId.fromSecret(new Secret(stack, 'AppIdSecret')),
-        privateKey: GithubAppKey.fromSecret(new Secret(stack, 'AppKey')),
-        webhookSecret: new Secret(stack, 'WebhookSecret'),
+        appId: GithubAppId.fromParameter(param(stack, 'AppIdSecret')),
+        privateKey: GithubAppKey.fromParameter(param(stack, 'AppKey')),
+        webhookSecret: param(stack, 'WebhookSecret'),
       }),
       scope: RunnerScope.org('my-org'),
     });
@@ -699,8 +704,8 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
     // one handler reachable from the public internet on a Function URL with
     // authType NONE. Granting it the App's credentials would put the ability
     // to register runners behind an unauthenticated endpoint.
-    expect(policiesGrantingSecretRead(template, 'AppIdSecret')).toBe(2);
-    expect(handlersGrantedSecretRead(template, 'AppIdSecret')).toEqual([
+    expect(policiesGrantingParameterRead(template, 'AppIdSecret')).toBe(2);
+    expect(handlersGrantedParameterRead(template, 'AppIdSecret')).toEqual([
       'JanitorFunction',
       'LauncherFunction',
     ]);
@@ -711,21 +716,21 @@ describe('GithubMicrovmRunners: GitHub App id plumbing', () => {
     mkRunners(stack, 'Runners', {
       github: GithubAuth.app({
         appId: GithubAppId.fromValue('123456'),
-        privateKey: GithubAppKey.fromSecret(new Secret(stack, 'AppKey')),
-        webhookSecret: new Secret(stack, 'WebhookSecret'),
+        privateKey: GithubAppKey.fromParameter(param(stack, 'AppKey')),
+        webhookSecret: param(stack, 'WebhookSecret'),
       }),
       scope: RunnerScope.org('my-org'),
     });
     const template = Template.fromStack(stack);
 
-    expect(policiesGrantingSecretRead(template, 'AppIdSecret')).toBe(0);
-    // The key secret is still granted to the two handlers that act as the App,
+    expect(policiesGrantingParameterRead(template, 'AppIdSecret')).toBe(0);
+    // The key parameter is still granted to the two handlers that act as the App,
     // so a zero above is not an artifact of the grant path being broken
     // wholesale. The webhook is absent here for the same reason as above, and
     // that absence is the point: the private key is exactly what should not
     // sit behind the public endpoint.
-    expect(policiesGrantingSecretRead(template, 'AppKey')).toBe(2);
-    expect(handlersGrantedSecretRead(template, 'AppKey')).toEqual([
+    expect(policiesGrantingParameterRead(template, 'AppKey')).toBe(2);
+    expect(handlersGrantedParameterRead(template, 'AppKey')).toEqual([
       'JanitorFunction',
       'LauncherFunction',
     ]);

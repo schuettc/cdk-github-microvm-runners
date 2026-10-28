@@ -1,6 +1,6 @@
 ---
 name: setup-github-app
-description: Use when a user needs to create and wire up the GitHub App that drives a cdk-github-microvm-runners runner set — creating the App with the exact permissions and webhook, storing its credentials in Secrets Manager, installing it on an org, and verifying the installation. Runs the manifest-flow helper that collapses the manual GitHub App gauntlet into two clicks.
+description: Use when a user needs to create and wire up the GitHub App that drives a cdk-github-microvm-runners runner set — creating the App with the exact permissions and webhook, storing its credentials as SSM Parameter Store SecureString parameters, installing it on an org, and verifying the installation. Runs the manifest-flow helper that collapses the manual GitHub App gauntlet into two clicks.
 ---
 
 # Set up the GitHub App for a MicroVM runner set
@@ -29,11 +29,11 @@ the human only clicks **Create** and **Install**.
 - **Deploy the runner set first.** The helper reads the webhook URL from the
   stack's `WebhookUrl` output, so the CloudFormation stack must already
   exist. (You can instead pass `--webhook-url` directly.) The stack deploys
-  before these secrets exist: it references all three by name and the handlers
+  before these parameters exist: it references all three by name and the handlers
   read them at run time, so one deploy and one run of this helper is the whole
   setup — no redeploy, and nothing copied by hand.
-- AWS credentials for the account holding the runner set (the helper writes to
-  Secrets Manager). Pass `--profile` / `--region` or set the usual env vars.
+- AWS credentials for the account holding the runner set (the helper writes
+  SecureString parameters to SSM Parameter Store). Pass `--profile` / `--region` or set the usual env vars.
 - Node 18+ and a browser on the machine running this (the flow opens two
   browser pages).
 - The user must be an **owner** of the target GitHub org (App creation and
@@ -45,15 +45,26 @@ the human only clicks **Create** and **Install**.
    - `--org` — the GitHub org the runners serve.
    - `--stack` — the deployed runner set's CloudFormation stack name (or
      `--webhook-url` if you have the URL directly).
-   - `--secret-prefix` — where to store credentials (default `microvm-runner/dev`).
-     The construct's `github` prop must point at these same secret names:
+   - `--parameter-prefix` — where to store credentials (default
+     `/microvm-runner/dev`). The construct's `github` prop must point at these
+     same parameter names:
      `<prefix>/app-id`, `<prefix>/app-private-key`, `<prefix>/webhook-secret`.
 
      ```ts
      github: GithubAuth.app({
-       appId: GithubAppId.fromSecret(appIdSecret),
-       privateKey: GithubAppKey.fromSecret(privateKeySecret),
-       webhookSecret,
+       appId: GithubAppId.fromParameter(
+         StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+           parameterName: '/microvm-runner/dev/app-id',
+         }),
+       ),
+       privateKey: GithubAppKey.fromParameter(
+         StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+           parameterName: '/microvm-runner/dev/app-private-key',
+         }),
+       ),
+       webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+         stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
+       ),
      }),
      ```
 
@@ -68,7 +79,7 @@ the human only clicks **Create** and **Install**.
    npx cdk-github-microvm-runners setup \
      --org <org> \
      --stack <stack-name> \
-     --secret-prefix microvm-runner/dev \
+     --parameter-prefix /microvm-runner/dev \
      --app-name <unique-app-name> \
      --profile <aws-profile> --region <region>
    ```
@@ -79,7 +90,7 @@ the human only clicks **Create** and **Install**.
    scoped to repositories rather than an organization uses `--account <login>`
    in place of `--org`.
 
-   Every run reads the stored secrets and the installation first and then does
+   Every run reads the stored parameters and the installation first and then does
    what is missing, so the same command is first-time setup, a health check,
    and a diagnosis. With nothing stored yet it creates the App, and what
    happens then — tell the user to watch their browser:
@@ -87,7 +98,7 @@ the human only clicks **Create** and **Install**.
      clicks **Create GitHub App**.
    - GitHub redirects to a localhost callback; the helper exchanges the
      one-time code for the App id, private key, and GitHub-generated webhook
-     secret, and writes all three to Secrets Manager.
+     secret, and writes all three as SecureString parameters.
    - A second tab opens the **Install** page. The user clicks **Install** and
      selects the org (all repos, or a subset).
    - The helper polls the installation and verifies it grants
@@ -107,7 +118,7 @@ the human only clicks **Create** and **Install**.
 
    ```bash
    npx cdk-github-microvm-runners setup --doctor \
-     --org <org> --stack <stack-name> --secret-prefix microvm-runner/dev \
+     --org <org> --stack <stack-name> --parameter-prefix /microvm-runner/dev \
      --profile <aws-profile> --region <region>
    ```
 
@@ -117,15 +128,15 @@ the human only clicks **Create** and **Install**.
 
 ## Notes
 
-- The helper is safe to re-run. It reads the three secrets and the App
+- The helper is safe to re-run. It reads the three parameters and the App
   installation before it does anything, and creates an App only when none of
   them is stored — so a second run against a working setup reports on it
   rather than making a second App. To deliberately create a fresh App, delete
-  the three secrets first, and give it an `--app-name` no other GitHub App is
+  the three parameters first, and give it an `--app-name` no other GitHub App is
   using.
 - GitHub does not expose App _creation_ via API — a human click is required
   once by design. The manifest flow is the most that can be automated; this
   skill automates all of it except the two clicks.
 - The private key GitHub returns at conversion time is shown **once**. The
-  helper stores it immediately in Secrets Manager; it is never written to
+  helper stores it immediately in Parameter Store; it is never written to
   disk.
