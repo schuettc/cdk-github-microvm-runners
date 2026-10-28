@@ -114,8 +114,9 @@ runners. A helper creates it through GitHub's App-manifest flow.
 The helper reads `WebhookUrl` from the deployed stack, creates the App pointed
 at that URL with the permissions the runners need (`actions: read` and
 organization `self-hosted runners: write`) and the `workflow_job`
-subscription, writes the App ID, private key, and webhook secret to Secrets
-Manager under `microvm-runner/dev`, and opens the install page. Install it
+subscription, writes the App ID, private key, and webhook secret to Parameter
+Store as SecureString parameters under `/microvm-runner/dev`, and opens the
+install page. Install it
 there, granting access to the repositories the runner set serves.
 
 It needs three things, which are the same three the stack was built with:
@@ -126,7 +127,8 @@ export STACK_NAME=Runners     # the CDK stack deployed above
 export AWS_REGION=us-east-1   # the region it was deployed to
 ```
 
-Then, with AWS credentials available:
+Then, with AWS credentials that can read the stack (`cloudformation:DescribeStacks`)
+and read and write the three parameters (`ssm:GetParameter`, `ssm:PutParameter`):
 
 ```bash
 npx cdk-github-microvm-runners setup \
@@ -144,7 +146,7 @@ stack's `SetupCommand` output — copy that instead if you would rather not set
 the variables:
 
 ```
-Runners.SetupCommand = npx cdk-github-microvm-runners@0.1 setup --org my-org --stack Runners --region us-east-1
+Runners.SetupCommand = npx cdk-github-microvm-runners@0.2 setup --org my-org --stack Runners --region us-east-1
 ```
 
 That is CloudFormation's output format: `Runners` is the stack, `SetupCommand`
@@ -178,8 +180,14 @@ To create the App by hand instead, give it `actions: read` and organization
 `self-hosted runners: write` — or repository `Administration: write` for a
 runner set scoped to repositories — subscribe it to `workflow_job`, set its
 webhook URL to the stack's `WebhookUrl` and its webhook secret to a value you
-choose, then store the App ID, the private-key PEM, and that webhook secret
-under the three secret names the stack reads.
+choose, then store the App ID, the private-key PEM, and that webhook secret as
+SecureString parameters under the three names the stack reads, for example:
+
+```bash
+aws ssm put-parameter --type SecureString --name /microvm-runner/dev/app-id --value 123456
+aws ssm put-parameter --type SecureString --name /microvm-runner/dev/app-private-key --value file://app.pem
+aws ssm put-parameter --type SecureString --name /microvm-runner/dev/webhook-secret --value file://webhook-secret.txt
+```
 
 ## 4. Run a job on it
 

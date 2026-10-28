@@ -286,9 +286,14 @@ export class GithubAuth {
    * parameter-backed App ID when one is used, or the PAT parameter — plus, in
    * every case, read access to the webhook secret.
    *
-   * A parameter imported with an `encryptionKey` (a customer-managed KMS key)
-   * also gets `kms:Decrypt` on that key; one under the account's `aws/ssm`
-   * key needs no KMS grant.
+   * A parameter under the account's `aws/ssm` key needs no KMS grant. For one
+   * encrypted with a customer-managed KMS key, pass that key as
+   * `encryptionKey` when importing the parameter, so `kms:Decrypt` is granted
+   * too.
+   *
+   * Parameters are read by name, so they must be in the runner set's own
+   * account and region; parameters shared from another account are not
+   * supported.
    *
    * This is the full set, for a handler that has to act as the App. A handler
    * that only verifies signatures wants {@link grantReadWebhookSecret}.
