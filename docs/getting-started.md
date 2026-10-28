@@ -186,8 +186,14 @@ SecureString parameters under the three names the stack reads, for example:
 ```bash
 aws ssm put-parameter --type SecureString --name /microvm-runner/dev/app-id --value 123456
 aws ssm put-parameter --type SecureString --name /microvm-runner/dev/app-private-key --value file://app.pem
+printf '%s' "$WEBHOOK_SECRET" > webhook-secret.txt   # no trailing newline
 aws ssm put-parameter --type SecureString --name /microvm-runner/dev/webhook-secret --value file://webhook-secret.txt
 ```
+
+`file://` stores the file's bytes exactly, including a final newline. The App ID
+is trimmed when read and a PEM still parses with one, but the webhook secret is
+used as stored, so a trailing newline there makes every delivery fail its
+signature check. Write it without one, as above.
 
 ## 4. Run a job on it
 
