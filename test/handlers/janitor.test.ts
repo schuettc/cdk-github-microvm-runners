@@ -740,7 +740,9 @@ describe('rule 4: VM lifetime backstop', () => {
     setRunnerSetVms([
       { microvmId: 'mvm-1', ageSeconds: LIFETIME_CAP_SECONDS + 1 },
     ]);
-    setTableRows([normalRow()]);
+    setTableRows([
+      normalRow({ launchedAt: isoMinusSeconds(LIFETIME_CAP_SECONDS + 1) }),
+    ]);
     const logSpy = jest
       .spyOn(console, 'log')
       .mockImplementation(() => undefined);
@@ -775,6 +777,71 @@ describe('rule 4: VM lifetime backstop', () => {
     await handler();
 
     expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+
+  it('measures a warm VM from when it was claimed for its job, not from when the pool launched it', async () => {
+    // Seen live 2026-10-28 (#84): a warm VM launched into the pool two hours
+    // earlier was killed 90 s into its job, because its age counted pool time.
+    setRunnerSetVms([
+      { microvmId: 'mvm-1', ageSeconds: LIFETIME_CAP_SECONDS * 2 },
+    ]);
+    setTableRows([normalRow({ launchedAt: isoMinusSeconds(90) })]);
+    listRunnersMock.mockResolvedValue([
+      githubRunner({ id: 1, name: 'microvm-runner-x-abc12345', busy: true }),
+    ]);
+
+    await handler();
+
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+
+  it('measures a just-claimed warm VM from its warm claim before the mapping row is written', async () => {
+    // Between resume and commitLaunch a claimed warm VM is RUNNING with only
+    // its warmvm# claim row; measuring from pool launch killed it (#84).
+    setRunnerSetVms([
+      { microvmId: 'mvm-warm', ageSeconds: LIFETIME_CAP_SECONDS * 2 },
+    ]);
+    setTableRows([
+      {
+        runnerName: 'warmvm#mvm-warm',
+        claimedAt: isoMinusSeconds(30),
+        expiresAt: Math.floor(NOW_MS / 1000) + 300,
+      } as unknown as RowFixture,
+    ]);
+
+    await handler();
+
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+
+  it('measures a claimed warm VM from its claim even while a leftover orphan row is reconciled', async () => {
+    setRunnerSetVms([
+      { microvmId: 'mvm-1', ageSeconds: LIFETIME_CAP_SECONDS * 2 },
+    ]);
+    setTableRows([
+      normalRow({ launchedAt: isoMinusSeconds(300) }),
+      orphanRow('mvm-1', isoMinusSeconds(INTERVAL_SECONDS + 30)),
+    ]);
+    listRunnersMock.mockResolvedValue([
+      githubRunner({ id: 1, name: 'microvm-runner-x-abc12345', busy: true }),
+    ]);
+
+    await handler();
+
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+
+  it('still kills a warm VM whose job has run past the cap since it was claimed', async () => {
+    setRunnerSetVms([
+      { microvmId: 'mvm-1', ageSeconds: LIFETIME_CAP_SECONDS * 2 },
+    ]);
+    setTableRows([
+      normalRow({ launchedAt: isoMinusSeconds(LIFETIME_CAP_SECONDS + 1) }),
+    ]);
+
+    await handler();
+
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(1);
   });
 });
 
@@ -1220,7 +1287,10 @@ describe('kill-ordering: no TerminateMicrovm without a preceding same-invocation
       { microvmId: 'mvm-orphan' },
     ]);
     setTableRows([
-      normalRow({ microvmId: 'mvm-lifetime' }),
+      normalRow({
+        microvmId: 'mvm-lifetime',
+        launchedAt: isoMinusSeconds(LIFETIME_CAP_SECONDS + 1),
+      }),
       orphanRow('mvm-orphan', isoMinusSeconds(INTERVAL_SECONDS + 1)),
     ]);
 
@@ -1260,7 +1330,12 @@ describe('kill-ordering: no TerminateMicrovm without a preceding same-invocation
     mvmMock.on(ListMicrovmImageVersionsCommand).resolves({ items: [] });
     ddbMock.on(ScanCommand).resolves({
       Items: [
-        marshall(normalRow({ microvmId: 'mvm-lifetime' })),
+        marshall(
+          normalRow({
+            microvmId: 'mvm-lifetime',
+            launchedAt: isoMinusSeconds(LIFETIME_CAP_SECONDS + 1),
+          }),
+        ),
         marshall(
           orphanRow('mvm-orphan', isoMinusSeconds(INTERVAL_SECONDS - 30)),
         ),
@@ -1592,6 +1667,7 @@ describe('EMF metrics output', () => {
       normalRow({
         runnerName: 'microvm-runner-x-life0001',
         microvmId: 'mvm-lifetime',
+        launchedAt: isoMinusSeconds(LIFETIME_CAP_SECONDS + 1),
       }),
     ]);
     listRunnersMock.mockResolvedValue([
@@ -1648,6 +1724,7 @@ describe('EMF metrics output', () => {
       normalRow({
         runnerName: 'microvm-runner-x-life0001',
         microvmId: 'mvm-lifetime',
+        launchedAt: isoMinusSeconds(LIFETIME_CAP_SECONDS + 1),
       }),
     ]);
     listRunnersMock.mockResolvedValue([
