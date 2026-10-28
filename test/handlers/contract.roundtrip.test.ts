@@ -26,11 +26,8 @@ import {
   RunMicrovmCommand,
   TerminateMicrovmCommand,
 } from '@aws-sdk/client-lambda-microvms';
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from '@aws-sdk/client-secrets-manager';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { marshall } from '@aws-sdk/util-dynamodb';
 import type { SQSEvent, SQSRecord } from 'aws-lambda';
 import { mockClient } from 'aws-sdk-client-mock';
@@ -55,14 +52,14 @@ import {
   handler as webhookHandler,
 } from '../../src/handlers/webhook.js';
 
-const smMock = mockClient(SecretsManagerClient);
+const ssmMock = mockClient(SSMClient);
 const sqsMock = mockClient(SQSClient);
 const ddbMock = mockClient(DynamoDBClient);
 const mvmMock = mockClient(LambdaMicrovmsClient);
 const generateJitConfigMock = jest.mocked(generateJitConfig);
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
-const SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:1:secret:webhook';
+const WEBHOOK_SECRET_PARAMETER = '/microvm-runner/dev/webhook-secret';
 const QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/1/queue';
 const IMAGE_ARN_DEFAULT =
   'arn:aws:lambda:us-east-1:1:microvm-image:default-image';
@@ -100,7 +97,7 @@ function resetEnv(): void {
 
 function setEnv(): void {
   // webhook.ts env
-  process.env.GH_WEBHOOK_SECRET_ARN = SECRET_ARN;
+  process.env.GH_WEBHOOK_SECRET_PARAMETER = WEBHOOK_SECRET_PARAMETER;
   process.env.QUEUE_URL = QUEUE_URL;
   process.env.SIZE_CLASS_LABELS = JSON.stringify(['microvm']);
 
@@ -183,13 +180,18 @@ beforeEach(() => {
   resetWebhookCaches();
   resetLauncherCaches();
 
-  smMock.reset();
+  ssmMock.reset();
   sqsMock.reset();
   ddbMock.reset();
   mvmMock.reset();
   generateJitConfigMock.mockReset();
 
-  smMock.on(GetSecretValueCommand).resolves({ SecretString: WEBHOOK_SECRET });
+  ssmMock
+    .on(GetParameterCommand, {
+      Name: WEBHOOK_SECRET_PARAMETER,
+      WithDecryption: true,
+    })
+    .resolves({ Parameter: { Value: WEBHOOK_SECRET } });
   sqsMock.on(SendMessageCommand).resolves({ MessageId: 'msg-1' });
   generateJitConfigMock.mockResolvedValue('encoded-jit-config-blob');
   mvmMock.on(ListMicrovmsCommand).resolves({ items: [] });

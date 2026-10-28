@@ -124,7 +124,7 @@ describe('setup CLI help', () => {
       '--account',
       '--stack',
       '--region',
-      '--secret-prefix',
+      '--parameter-prefix',
       '--app-name',
       '--port',
       '--doctor',

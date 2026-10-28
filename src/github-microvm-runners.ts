@@ -257,7 +257,7 @@ export interface GithubMicrovmRunnersProps {
    * Customer-managed KMS key for this runner set's data at rest: the DynamoDB
    * runner table, the SQS job queue and dead-letter queue, and any log group
    * this construct creates. Log groups you bring yourself, and the GitHub
-   * secrets you pass in, keep their own keys.
+   * credential parameters you pass in, keep their own keys.
    * @default undefined (AWS-managed keys)
    */
   readonly encryptionKey?: kms.IKey;
@@ -1125,14 +1125,18 @@ interface InternalRunnerClass extends RunnerClass {
  * @example
  * const runnerSet = new GithubMicrovmRunners(stack, 'Runners', {
  *   github: GithubAuth.app({
- *     appId: GithubAppId.fromSecret(
- *       Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+ *     appId: GithubAppId.fromParameter(
+ *       StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+ *         parameterName: '/microvm-runner/dev/app-id',
+ *       }),
  *     ),
- *     privateKey: GithubAppKey.fromSecret(
- *       Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+ *     privateKey: GithubAppKey.fromParameter(
+ *       StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+ *         parameterName: '/microvm-runner/dev/app-private-key',
+ *       }),
  *     ),
- *     webhookSecret: Secret.fromSecretNameV2(
- *       stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+ *     webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+ *       stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
  *     ),
  *   }),
  *   scope: RunnerScope.org('my-org'),
@@ -1605,8 +1609,8 @@ export class GithubMicrovmRunners extends Construct {
     });
     // The webhook secret ONLY — not the credentials that can act as the App.
     // This handler verifies GitHub's HMAC signature and enqueues; it never
-    // mints an installation token, and `GH_WEBHOOK_SECRET_ARN` is the one
-    // secret it reads. It is also the single component reachable from the
+    // mints an installation token, and `GH_WEBHOOK_SECRET_PARAMETER` is the
+    // one credential it reads. It is also the single component reachable from the
     // public internet, on a Function URL with `authType: NONE`, so the App's
     // private key and `kms:Sign` are exactly what should not sit behind it.
     props.github.grantReadWebhookSecret(webhookFunction);

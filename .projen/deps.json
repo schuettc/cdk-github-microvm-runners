@@ -17,10 +17,6 @@
       "type": "build"
     },
     {
-      "name": "@aws-sdk/client-secrets-manager",
-      "type": "build"
-    },
-    {
       "name": "@aws-sdk/client-sqs",
       "type": "build"
     },

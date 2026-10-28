@@ -85,7 +85,8 @@ pip install cdk-github-microvm-runners
 ## Getting started
 
 To deploy, you need an AWS account, a GitHub App connected to the runner set,
-and the App's private key and webhook secret stored in AWS Secrets Manager. The
+and the App's ID, private key and webhook secret stored as SSM Parameter Store
+SecureString parameters. The
 [getting-started guide](docs/getting-started.md) walks through all three, and
 includes a helper that performs the GitHub App setup for you.
 
@@ -94,7 +95,7 @@ every language.
 
 ```ts nofixture
 import { App, CfnOutput, Stack } from 'aws-cdk-lib';
-import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import {
   GithubMicrovmRunners,
   GithubAppId,
@@ -107,28 +108,28 @@ import {
 const app = new App();
 const stack = new Stack(app, 'Runners', { env: { region: 'us-east-1' } });
 
-// The GitHub App's ID, private key, and webhook secret are read from Secrets
-// Manager at run time, so this stack deploys before the App is created.
-const appId = Secret.fromSecretNameV2(
+// The GitHub App's ID, private key, and webhook secret are read from SSM
+// Parameter Store at run time, so this stack deploys before the App is created.
+const appId = StringParameter.fromSecureStringParameterAttributes(
   stack,
   'AppId',
-  'microvm-runner/dev/app-id',
+  { parameterName: '/microvm-runner/dev/app-id' },
 );
-const privateKey = Secret.fromSecretNameV2(
+const privateKey = StringParameter.fromSecureStringParameterAttributes(
   stack,
   'AppKey',
-  'microvm-runner/dev/app-private-key',
+  { parameterName: '/microvm-runner/dev/app-private-key' },
 );
-const webhookSecret = Secret.fromSecretNameV2(
+const webhookSecret = StringParameter.fromSecureStringParameterAttributes(
   stack,
   'WebhookSecret',
-  'microvm-runner/dev/webhook-secret',
+  { parameterName: '/microvm-runner/dev/webhook-secret' },
 );
 
 const runners = new GithubMicrovmRunners(stack, 'Runners', {
   github: GithubAuth.app({
-    appId: GithubAppId.fromSecret(appId),
-    privateKey: GithubAppKey.fromSecret(privateKey),
+    appId: GithubAppId.fromParameter(appId),
+    privateKey: GithubAppKey.fromParameter(privateKey),
     webhookSecret,
   }),
   scope: RunnerScope.org('my-org'),

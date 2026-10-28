@@ -1,18 +1,6 @@
 import type { IGrantable } from 'aws-cdk-lib/aws-iam';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
-import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
-
-/**
- * Secrets Manager reference safe for runtime GetSecretValue + IAM wildcard
- * grants. grantRead() policies use the `-??????` suffix wildcard, which
- * matches FULL ARNs; requests by partial ARN (what `secretArn` returns for
- * secrets imported by name) are evaluated as-is by IAM and DENIED. Requests
- * by full ARN or by NAME both resolve and match. Found at first live deploy
- * (2026-07-18, webhook 502 -> AccessDenied autopsy).
- */
-function secretRuntimeRef(secret: ISecret): string {
-  return secret.secretFullArn ?? secret.secretName;
-}
+import type { IStringParameter } from 'aws-cdk-lib/aws-ssm';
 
 /** Which credential flow a `GithubAuth` represents. */
 export enum GithubAuthKind {
@@ -23,27 +11,32 @@ export enum GithubAuthKind {
 }
 
 /**
- * Where a GitHub App's private key lives: a Secrets Manager secret holding the
- * PEM, or a KMS key that signs the App's JWTs directly.
+ * Where a GitHub App's private key lives: an SSM SecureString parameter
+ * holding the PEM, or a KMS key that signs the App's JWTs directly.
  *
  * Build one with the static factories below; the constructor is private.
  *
  * @example
- * const privateKey = GithubAppKey.fromSecret(
- *   Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+ * const privateKey = GithubAppKey.fromParameter(
+ *   StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+ *     parameterName: '/microvm-runner/dev/app-private-key',
+ *   }),
  * );
  */
 export class GithubAppKey {
   /**
-   * The App's private key is stored as a PEM in Secrets Manager.
+   * The App's private key is stored as a PEM in an SSM SecureString
+   * parameter, read at runtime with decryption.
    *
    * @example
-   * const privateKey = GithubAppKey.fromSecret(
-   *   Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+   * const privateKey = GithubAppKey.fromParameter(
+   *   StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+   *     parameterName: '/microvm-runner/dev/app-private-key',
+   *   }),
    * );
    */
-  public static fromSecret(secret: ISecret): GithubAppKey {
-    return new GithubAppKey(secret, undefined);
+  public static fromParameter(parameter: IStringParameter): GithubAppKey {
+    return new GithubAppKey(parameter, undefined);
   }
 
   /**
@@ -65,8 +58,8 @@ export class GithubAppKey {
   }
 
   private constructor(
-    /** The secret holding the PEM, for a key built with `fromSecret()`. */
-    public readonly secret?: ISecret,
+    /** The parameter holding the PEM, for a key built with `fromParameter()`. */
+    public readonly parameter?: IStringParameter,
     /** The signing key, for a key built with `fromKmsKey()`. */
     public readonly kmsKey?: IKey,
   ) {}
@@ -74,19 +67,21 @@ export class GithubAppKey {
 
 /**
  * Where a GitHub App's numeric ID comes from: a literal known at synth time,
- * or a Secrets Manager secret read at runtime.
+ * or an SSM SecureString parameter read at runtime.
  *
- * The secret form makes setup single-pass. A GitHub App can only be created
+ * The parameter form makes setup single-pass. A GitHub App can only be created
  * once the runner set's webhook URL exists, so an App ID that has to be known
- * at synth means deploying twice. Referencing the ID by secret, the way the
+ * at synth means deploying twice. Referencing the ID by parameter, the way the
  * private key and webhook secret already are, lets you deploy, then create the
- * App and write its ID into the secret, with no redeploy.
+ * App and write its ID into the parameter, with no redeploy.
  *
  * Build one with the static factories below; the constructor is private.
  *
  * @example
- * const appId = GithubAppId.fromSecret(
- *   Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+ * const appId = GithubAppId.fromParameter(
+ *   StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+ *     parameterName: '/microvm-runner/dev/app-id',
+ *   }),
  * );
  */
 export class GithubAppId {
@@ -101,47 +96,49 @@ export class GithubAppId {
   }
 
   /**
-   * The App ID is read at runtime from a Secrets Manager secret whose value
-   * is the numeric ID. The secret need not exist at deploy time.
+   * The App ID is read at runtime from an SSM SecureString parameter whose
+   * value is the numeric ID. The parameter need not exist at deploy time.
    *
    * @example
-   * const appId = GithubAppId.fromSecret(
-   *   Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+   * const appId = GithubAppId.fromParameter(
+   *   StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+   *     parameterName: '/microvm-runner/dev/app-id',
+   *   }),
    * );
    */
-  public static fromSecret(secret: ISecret): GithubAppId {
-    return new GithubAppId(undefined, secret);
+  public static fromParameter(parameter: IStringParameter): GithubAppId {
+    return new GithubAppId(undefined, parameter);
   }
 
   private constructor(
     /** The literal ID, for an ID built with `fromValue()`. */
     public readonly value?: string,
-    /** The secret holding the ID, for an ID built with `fromSecret()`. */
-    public readonly secret?: ISecret,
+    /** The parameter holding the ID, for an ID built with `fromParameter()`. */
+    public readonly parameter?: IStringParameter,
   ) {}
 }
 
 /** Props for `GithubAuth.app`. */
 export interface GithubAppAuthProps {
-  /** The GitHub App's numeric ID, as a literal or a Secrets Manager reference. */
+  /** The GitHub App's numeric ID, as a literal or a parameter reference. */
   readonly appId: GithubAppId;
-  /** The App's private key, backed by a secret or a KMS key. */
+  /** The App's private key, backed by a parameter or a KMS key. */
   readonly privateKey: GithubAppKey;
-  /** Secret holding the webhook secret used to validate inbound deliveries. */
-  readonly webhookSecret: ISecret;
+  /** SecureString parameter holding the webhook secret used to validate inbound deliveries. */
+  readonly webhookSecret: IStringParameter;
 }
 
 /** Props for `GithubAuth.pat`. */
 export interface GithubPatAuthProps {
-  /** Secret holding a GitHub personal access token. */
-  readonly token: ISecret;
-  /** Secret holding the webhook secret used to validate inbound deliveries. */
-  readonly webhookSecret: ISecret;
+  /** SecureString parameter holding a GitHub personal access token. */
+  readonly token: IStringParameter;
+  /** SecureString parameter holding the webhook secret used to validate inbound deliveries. */
+  readonly webhookSecret: IStringParameter;
 }
 
 /**
  * How a runner set authenticates to GitHub: as a GitHub App, whose private key
- * is backed by a secret or a KMS key, or with a personal access token. Either
+ * is backed by a SecureString parameter or a KMS key, or with a personal access token. Either
  * form also carries the webhook secret that inbound GitHub deliveries are
  * validated against.
  *
@@ -149,14 +146,18 @@ export interface GithubPatAuthProps {
  *
  * @example
  * const auth = GithubAuth.app({
- *   appId: GithubAppId.fromSecret(
- *     Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+ *   appId: GithubAppId.fromParameter(
+ *     StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+ *       parameterName: '/microvm-runner/dev/app-id',
+ *     }),
  *   ),
- *   privateKey: GithubAppKey.fromSecret(
- *     Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+ *   privateKey: GithubAppKey.fromParameter(
+ *     StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+ *       parameterName: '/microvm-runner/dev/app-private-key',
+ *     }),
  *   ),
- *   webhookSecret: Secret.fromSecretNameV2(
- *     stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+ *   webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+ *     stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
  *   ),
  * });
  */
@@ -166,14 +167,18 @@ export class GithubAuth {
    *
    * @example
    * const auth = GithubAuth.app({
-   *   appId: GithubAppId.fromSecret(
-   *     Secret.fromSecretNameV2(stack, 'AppId', 'microvm-runner/dev/app-id'),
+   *   appId: GithubAppId.fromParameter(
+   *     StringParameter.fromSecureStringParameterAttributes(stack, 'AppId', {
+   *       parameterName: '/microvm-runner/dev/app-id',
+   *     }),
    *   ),
-   *   privateKey: GithubAppKey.fromSecret(
-   *     Secret.fromSecretNameV2(stack, 'AppKey', 'microvm-runner/dev/app-private-key'),
+   *   privateKey: GithubAppKey.fromParameter(
+   *     StringParameter.fromSecureStringParameterAttributes(stack, 'AppKey', {
+   *       parameterName: '/microvm-runner/dev/app-private-key',
+   *     }),
    *   ),
-   *   webhookSecret: Secret.fromSecretNameV2(
-   *     stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+   *   webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+   *     stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
    *   ),
    * });
    */
@@ -192,9 +197,11 @@ export class GithubAuth {
    *
    * @example
    * const auth = GithubAuth.pat({
-   *   token: Secret.fromSecretNameV2(stack, 'Pat', 'microvm-runner/dev/token'),
-   *   webhookSecret: Secret.fromSecretNameV2(
-   *     stack, 'WebhookSecret', 'microvm-runner/dev/webhook-secret',
+   *   token: StringParameter.fromSecureStringParameterAttributes(
+   *     stack, 'Pat', { parameterName: '/microvm-runner/dev/token' },
+   *   ),
+   *   webhookSecret: StringParameter.fromSecureStringParameterAttributes(
+   *     stack, 'WebhookSecret', { parameterName: '/microvm-runner/dev/webhook-secret' },
    *   ),
    * });
    */
@@ -211,44 +218,46 @@ export class GithubAuth {
   private constructor(
     /** Whether this is App or personal-access-token authentication. */
     public readonly kind: GithubAuthKind,
-    /** Secret holding the webhook secret inbound deliveries are validated against. */
-    public readonly webhookSecret: ISecret,
+    /** Parameter holding the webhook secret inbound deliveries are validated against. */
+    public readonly webhookSecret: IStringParameter,
     /** The App's ID, for App authentication. */
     public readonly appId?: GithubAppId,
     /** The App's private key, for App authentication. */
     public readonly privateKey?: GithubAppKey,
-    /** The personal access token secret, for token authentication. */
-    public readonly token?: ISecret,
+    /** The personal access token parameter, for token authentication. */
+    public readonly token?: IStringParameter,
   ) {}
 
   /**
    * Serialize to the environment variables the runner set's handlers read:
-   * `GH_AUTH_KIND`, `GH_APP_ID` or `GH_APP_ID_SECRET_ARN`,
-   * `GH_KEY_SECRET_ARN` or `GH_KEY_KMS_ARN`, `GH_PAT_SECRET_ARN`, and
-   * `GH_WEBHOOK_SECRET_ARN`. Entries that do not apply are left out.
+   * `GH_AUTH_KIND`, `GH_APP_ID` or `GH_APP_ID_PARAMETER`,
+   * `GH_KEY_PARAMETER` or `GH_KEY_KMS_ARN`, `GH_PAT_PARAMETER`, and
+   * `GH_WEBHOOK_SECRET_PARAMETER`. Each `*_PARAMETER` holds a parameter NAME,
+   * which `ssm:GetParameter` takes as-is. Entries that do not apply are left
+   * out.
    */
   public bindEnv(): Record<string, string> {
     const env: Record<string, string> = {
       GH_AUTH_KIND: this.kind,
-      GH_WEBHOOK_SECRET_ARN: secretRuntimeRef(this.webhookSecret),
+      GH_WEBHOOK_SECRET_PARAMETER: this.webhookSecret.parameterName,
     };
 
     if (this.kind === GithubAuthKind.APP) {
-      // Exactly one of the two: a literal ID baked in at synth, or a secret
+      // Exactly one of the two: a literal ID baked in at synth, or a parameter
       // reference the handlers resolve at runtime.
-      if (this.appId?.secret) {
-        env.GH_APP_ID_SECRET_ARN = secretRuntimeRef(this.appId.secret);
+      if (this.appId?.parameter) {
+        env.GH_APP_ID_PARAMETER = this.appId.parameter.parameterName;
       } else {
         env.GH_APP_ID = this.appId!.value!;
       }
-      if (this.privateKey?.secret) {
-        env.GH_KEY_SECRET_ARN = secretRuntimeRef(this.privateKey.secret);
+      if (this.privateKey?.parameter) {
+        env.GH_KEY_PARAMETER = this.privateKey.parameter.parameterName;
       }
       if (this.privateKey?.kmsKey) {
         env.GH_KEY_KMS_ARN = this.privateKey.kmsKey.keyArn;
       }
     } else {
-      env.GH_PAT_SECRET_ARN = secretRuntimeRef(this.token!);
+      env.GH_PAT_PARAMETER = this.token!.parameterName;
     }
 
     return env;
@@ -273,17 +282,26 @@ export class GithubAuth {
 
   /**
    * Grant `grantee` read access to whichever credentials this auth carries:
-   * the App's secret-backed key and/or `kms:Sign` on its KMS key, plus its
-   * secret-backed App ID when one is used, or the PAT secret — plus, in every
-   * case, read access to the webhook secret.
+   * the App's parameter-backed key and/or `kms:Sign` on its KMS key, plus its
+   * parameter-backed App ID when one is used, or the PAT parameter — plus, in
+   * every case, read access to the webhook secret.
+   *
+   * A parameter under the account's `aws/ssm` key needs no KMS grant. For one
+   * encrypted with a customer-managed KMS key, pass that key as
+   * `encryptionKey` when importing the parameter, so `kms:Decrypt` is granted
+   * too.
+   *
+   * Parameters are read by name, so they must be in the runner set's own
+   * account and region; parameters shared from another account are not
+   * supported.
    *
    * This is the full set, for a handler that has to act as the App. A handler
    * that only verifies signatures wants {@link grantReadWebhookSecret}.
    */
   public grantRead(grantee: IGrantable): void {
     if (this.kind === GithubAuthKind.APP) {
-      this.appId?.secret?.grantRead(grantee);
-      this.privateKey?.secret?.grantRead(grantee);
+      this.appId?.parameter?.grantRead(grantee);
+      this.privateKey?.parameter?.grantRead(grantee);
       this.privateKey?.kmsKey?.grant(grantee, 'kms:Sign');
     } else {
       this.token?.grantRead(grantee);

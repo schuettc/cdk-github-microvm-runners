@@ -5,8 +5,8 @@ flowchart TD
     GH["GitHub Actions"] -->|"workflow_job, HMAC-signed"| WH["Webhook Lambda — public URL"]
     WH -->|"signature verified"| Q["SQS queue"]
     Q --> LN["Launcher Lambda"]
-    SM[("Secrets Manager")] -.->|"webhook secret only"| WH
-    SM -.->|"App ID, private key, webhook secret"| LN
+    PS[("SSM Parameter Store")] -.->|"webhook secret only"| WH
+    PS -.->|"App ID, private key, webhook secret"| LN
     LN -->|"launches"| VM
 
     subgraph VM["MicroVM runner"]
@@ -73,7 +73,12 @@ approval left on.
 
 The webhook, launcher, and janitor are the control plane, and they hold what a
 runner set needs to talk to GitHub and AWS. The GitHub App's ID, private key,
-and webhook secret live in AWS Secrets Manager and are read at run time.
+and webhook secret live in SSM Parameter Store as SecureString parameters and
+are read at run time, decrypted by SSM. They are read by name, so they must be
+in the runner set's own account and region. Under the account's `aws/ssm` key no
+KMS permission is needed; for a customer-managed key, pass it as
+`encryptionKey` when importing the parameter so the handlers are granted
+`kms:Decrypt` on it.
 
 They are not read by all three. The launcher and janitor act as the App —
 minting installation tokens, registering and removing runners — so they read
