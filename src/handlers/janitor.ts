@@ -139,6 +139,8 @@ interface RunnerRow {
    * {@link MAX_UNREGISTERED_RELAUNCH_ATTEMPTS}.
    */
   relaunchAttempts?: number;
+  /** Warm-claim rows only (`warmvm#<microvmId>`): when the job claimed the VM, written by `claimWarmVm`. */
+  claimedAt?: string;
 }
 
 interface Metrics {
@@ -199,6 +201,8 @@ interface JanitorContext {
   jobQueueUrl?: string;
   /** claimKey (`job#<repo>#<jobId>`) -> claim row, built from THIS sweep's scan. Lets the `unregistered` reap find a job's committed claim without a second read. Populated by `reconcileTable`. */
   claimsByKey: Map<string, RunnerRow>;
+  /** microvmId -> when a job claimed that VM (epoch ms), from this sweep's scan: the earliest of its mapping row's `launchedAt` and its `warmvm#` row's `claimedAt`. Read by {@link lifetimeAgeSeconds}. Populated by `reconcileTable`. */
+  claimedAtMs: Map<string, number>;
 }
 
 const {
@@ -284,21 +288,30 @@ function vmAgeSeconds(vm: RunnerSetVm, nowMs: number): number {
 }
 
 /**
- * How long a VM has been serving its job, for the lifetime backstop: since the
- * launcher's mapping row was written (`launchedAt`, when the job claimed the
- * VM), or the VM's own age when it has no such row. For a cold VM the two are
- * seconds apart; for a warm VM `startedAt` is when the pool launched it, which
- * can be hours earlier, so measuring from it killed warm VMs mid-job (#84).
+ * How long a VM has been serving its job, for the lifetime backstop: since a
+ * job claimed it (see {@link JanitorContext.claimedAtMs}), or the VM's own age
+ * when no claim is known. For a cold VM the two are seconds apart; for a warm
+ * VM `startedAt` is when the pool launched it, which can be hours earlier, so
+ * measuring from it killed warm VMs mid-job (#84). The warm claim row covers
+ * the window between resume and the mapping row being written.
  */
-function lifetimeAgeSeconds(
-  vm: RunnerSetVm,
-  row: RunnerRow | undefined,
-  nowMs: number,
-): number {
-  const vmAge = vmAgeSeconds(vm, nowMs);
-  const claimedMs = row?.launchedAt ? Date.parse(row.launchedAt) : NaN;
-  if (Number.isNaN(claimedMs)) return vmAge;
-  return Math.min(vmAge, (nowMs - claimedMs) / 1000);
+function lifetimeAgeSeconds(ctx: JanitorContext, vm: RunnerSetVm): number {
+  const vmAge = vmAgeSeconds(vm, ctx.nowMs);
+  const claimedMs = ctx.claimedAtMs.get(vm.microvmId);
+  if (claimedMs === undefined) return vmAge;
+  return Math.min(vmAge, (ctx.nowMs - claimedMs) / 1000);
+}
+
+/** Record the earliest claim time seen for `microvmId` (see {@link JanitorContext.claimedAtMs}). */
+function noteClaim(
+  ctx: JanitorContext,
+  microvmId: string,
+  iso: string | undefined,
+): void {
+  const ms = iso ? Date.parse(iso) : NaN;
+  if (Number.isNaN(ms)) return;
+  const known = ctx.claimedAtMs.get(microvmId);
+  if (known === undefined || ms < known) ctx.claimedAtMs.set(microvmId, ms);
 }
 
 async function scanRunnerTable(
@@ -567,7 +580,8 @@ async function tryLifetimeKill(
       msg: 'janitor: lifetimeKill',
       microvmId: vm.microvmId,
       runnerName: row?.runnerName,
-      vmAgeSeconds: age,
+      vmAgeSeconds: Math.round(vmAgeSeconds(vm, ctx.nowMs)),
+      secondsSinceClaim: Math.round(age),
       lifetimeCapSeconds: ctx.lifetimeCapSeconds,
     }),
   );
@@ -815,9 +829,7 @@ async function reconcileRunningVm(
 ): Promise<void> {
   const age = vmAgeSeconds(vm, ctx.nowMs);
 
-  if (
-    await tryLifetimeKill(ctx, vm, row, lifetimeAgeSeconds(vm, row, ctx.nowMs))
-  ) {
+  if (await tryLifetimeKill(ctx, vm, row, lifetimeAgeSeconds(ctx, vm))) {
     return;
   }
   if (!row || isOrphanRow(row)) {
@@ -1218,6 +1230,13 @@ async function reconcileTable(ctx: JanitorContext): Promise<void> {
   const candidateRows = scannedRows.filter(
     (r) => !isClaimRow(r) && !isWarmClaimRow(r),
   );
+  for (const r of scannedRows) {
+    if (isWarmClaimRow(r)) {
+      noteClaim(ctx, r.runnerName.slice(WARM_CLAIM_PREFIX.length), r.claimedAt);
+    } else if (!isClaimRow(r) && !isOrphanRow(r) && r.microvmId) {
+      noteClaim(ctx, r.microvmId, r.launchedAt);
+    }
+  }
   // Zombie guard (live-hit, bench 2026-07-22): a row with no `microvmId`
   // can exist when an unconditional UpdateItem raced DynamoDB's TTL delete
   // and resurrected the key with a single attribute (see
@@ -1997,6 +2016,7 @@ async function buildContext(): Promise<JanitorContext> {
       ? { jobQueueUrl: requireEnv('JOB_QUEUE_URL') }
       : {}),
     claimsByKey: new Map(),
+    claimedAtMs: new Map(),
   };
 }
 

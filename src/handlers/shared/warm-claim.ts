@@ -76,6 +76,9 @@ export async function claimWarmVm(p: {
         Item: marshall({
           runnerName: `${WARM_CLAIM_PREFIX}${p.microvmId}`,
           expiresAt,
+          // When the job claimed the VM: the janitor's lifetime backstop
+          // measures from here until the mapping row exists (#84).
+          claimedAt: new Date(p.nowMs).toISOString(),
         }),
         ConditionExpression: 'attribute_not_exists(runnerName)',
       }),

@@ -35,6 +35,9 @@ describe('claimWarmVm', () => {
       marshall({
         runnerName: `warmvm#${MICROVM_ID}`,
         expiresAt: Math.floor(NOW_MS / 1000) + 300,
+        // When the job claimed the VM: the janitor's lifetime backstop
+        // measures from here before the mapping row exists (#84).
+        claimedAt: new Date(NOW_MS).toISOString(),
       }),
     );
   });

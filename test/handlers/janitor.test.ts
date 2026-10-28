@@ -795,6 +795,42 @@ describe('rule 4: VM lifetime backstop', () => {
     expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
   });
 
+  it('measures a just-claimed warm VM from its warm claim before the mapping row is written', async () => {
+    // Between resume and commitLaunch a claimed warm VM is RUNNING with only
+    // its warmvm# claim row; measuring from pool launch killed it (#84).
+    setRunnerSetVms([
+      { microvmId: 'mvm-warm', ageSeconds: LIFETIME_CAP_SECONDS * 2 },
+    ]);
+    setTableRows([
+      {
+        runnerName: 'warmvm#mvm-warm',
+        claimedAt: isoMinusSeconds(30),
+        expiresAt: Math.floor(NOW_MS / 1000) + 300,
+      } as unknown as RowFixture,
+    ]);
+
+    await handler();
+
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+
+  it('measures a claimed warm VM from its claim even while a leftover orphan row is reconciled', async () => {
+    setRunnerSetVms([
+      { microvmId: 'mvm-1', ageSeconds: LIFETIME_CAP_SECONDS * 2 },
+    ]);
+    setTableRows([
+      normalRow({ launchedAt: isoMinusSeconds(300) }),
+      orphanRow('mvm-1', isoMinusSeconds(INTERVAL_SECONDS + 30)),
+    ]);
+    listRunnersMock.mockResolvedValue([
+      githubRunner({ id: 1, name: 'microvm-runner-x-abc12345', busy: true }),
+    ]);
+
+    await handler();
+
+    expect(mvmMock.commandCalls(TerminateMicrovmCommand)).toHaveLength(0);
+  });
+
   it('still kills a warm VM whose job has run past the cap since it was claimed', async () => {
     setRunnerSetVms([
       { microvmId: 'mvm-1', ageSeconds: LIFETIME_CAP_SECONDS * 2 },
