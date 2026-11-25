@@ -139,6 +139,16 @@ interface RunnerRow {
    * {@link MAX_UNREGISTERED_RELAUNCH_ATTEMPTS}.
    */
   relaunchAttempts?: number;
+  /**
+   * Claim rows only: ISO time the committed-claim reconciler found this
+   * claim's GitHub job no longer `queued` (completed, cancelled, or gone) and
+   * stamped it, via {@link settleCommittedClaim}. A settled claim is never
+   * probed again: a GitHub re-run always gives each job a new job id, so a job
+   * that has left `queued` never returns to it under the same id. The row
+   * stays as the launcher's launch-idempotency marker and expires on its own
+   * `expiresAt`.
+   */
+  settledAt?: string;
   /** Warm-claim rows only (`warmvm#<microvmId>`): when the job claimed the VM, written by `claimWarmVm`. */
   claimedAt?: string;
 }
@@ -945,10 +955,11 @@ async function reconcileCommittedClaim(
   ctx: JanitorContext,
   claimRow: RunnerRow,
   jobQueueUrl: string,
+  budget: GithubReadBudget,
 ): Promise<void> {
   const vm = await getMicrovm(claimRow.microvmId);
   if (vm && vm.state !== 'TERMINATED') {
-    return; // RUNNING/SUSPENDED/other — not dead, leave it
+    return; // RUNNING/SUSPENDED/other — not dead, leave it (spends no read)
   }
   if (!claimRow.repo || typeof claimRow.jobId !== 'number') {
     return; // malformed claim — leave for hygiene
@@ -957,6 +968,9 @@ async function reconcileCommittedClaim(
   if (!owner || !name) {
     return;
   }
+  // The slot is spent here, immediately before the GitHub call, so it is
+  // counted even when the call throws.
+  budget.used += 1;
   const job = await getWorkflowJob(
     resolveTarget(ctx.scope, claimRow.repo),
     owner,
@@ -964,7 +978,10 @@ async function reconcileCommittedClaim(
     claimRow.jobId,
   );
   if (job?.status !== 'queued') {
-    return; // job done/cancelled/gone — leave for hygiene delete on expiry
+    // Job done/cancelled/gone: stamp it so later sweeps skip it without a
+    // read; the row itself is left for the hygiene delete on expiry.
+    await settleCommittedClaim(ctx, claimRow);
+    return;
   }
   // ONE relaunch bound, shared with the `unregistered` reap: read the counter
   // this path last stamped (via the launch message) and, at the cap, RELEASE
@@ -1040,6 +1057,40 @@ async function reconcileCommittedClaim(
       attempt: nextAttempt,
     }),
   );
+}
+
+/** GitHub job reads the committed-claim reconciler has spent this sweep, against {@link COMMITTED_CLAIM_RECONCILE_CAP}. */
+interface GithubReadBudget {
+  used: number;
+}
+
+/**
+ * Stamp `settledAt` on a committed claim whose job is no longer queued (see
+ * {@link RunnerRow.settledAt}). Goes through {@link updateExistingRow}, so a
+ * claim the TTL deleted mid-sweep is not brought back. A failed write is
+ * logged and counted in `errors` and never aborts the sweep: the claim is
+ * simply probed again next sweep.
+ */
+async function settleCommittedClaim(
+  ctx: JanitorContext,
+  claimRow: RunnerRow,
+): Promise<void> {
+  try {
+    await updateExistingRow(ctx.tableName, claimRow.runnerName, {
+      UpdateExpression: 'SET settledAt = :t',
+      ExpressionAttributeValues: { ':t': ctx.nowIso },
+    });
+  } catch (err) {
+    ctx.metrics.errors += 1;
+    console.error(
+      JSON.stringify({
+        scope: 'reconcile',
+        action: 'committed-claim-settle-failed',
+        runnerName: claimRow.runnerName,
+        err: serializeError(err),
+      }),
+    );
+  }
 }
 
 /**
@@ -1280,7 +1331,11 @@ async function reconcileTable(ctx: JanitorContext): Promise<void> {
   // a second read — see `relaunchUnregisteredJob`.
   ctx.claimsByKey = new Map(claimRows.map((c) => [c.runnerName, c]));
   const nowSeconds = Math.floor(ctx.nowMs / 1000);
-  let committedClaimsReconciled = 0;
+  const githubReads: GithubReadBudget = { used: 0 };
+  // Unsettled, unexpired committed claims met after the read budget ran out.
+  // They are counted WITHOUT reading their VM, so this is "left unchecked",
+  // not "known stranded": some of them may still have a live VM.
+  let committedClaimsDeferred = 0;
   for (const claimRow of claimRows) {
     if (claimRow.expiresAt !== undefined && claimRow.expiresAt <= nowSeconds) {
       try {
@@ -1298,19 +1353,24 @@ async function reconcileTable(ctx: JanitorContext): Promise<void> {
       }
       continue;
     }
-    // Committed-but-unserved recovery (opt-in). Only committed claims are
-    // candidates; per-item isolated so one failure can't abort the sweep.
-    // Capped at COMMITTED_CLAIM_RECONCILE_CAP per sweep (see its doc comment)
-    // — hygiene deletes above are never capped, only this GitHub-probing path.
+    // Committed-but-unserved recovery (opt-in). Only committed, unsettled
+    // claims are candidates; per-item isolated so one failure can't abort the
+    // sweep. GitHub job reads are capped at COMMITTED_CLAIM_RECONCILE_CAP per
+    // sweep (see its doc comment): a settled claim is skipped before any read,
+    // and a claim whose VM is alive spends no read. Hygiene deletes above are
+    // never capped.
     if (
       recoverStuckLaunchesEnabled &&
       jobQueueUrl &&
       isCommittedClaim(claimRow) &&
-      committedClaimsReconciled < COMMITTED_CLAIM_RECONCILE_CAP
+      claimRow.settledAt === undefined
     ) {
-      committedClaimsReconciled += 1;
+      if (githubReads.used >= COMMITTED_CLAIM_RECONCILE_CAP) {
+        committedClaimsDeferred += 1;
+        continue;
+      }
       try {
-        await reconcileCommittedClaim(ctx, claimRow, jobQueueUrl);
+        await reconcileCommittedClaim(ctx, claimRow, jobQueueUrl, githubReads);
       } catch (err) {
         ctx.metrics.errors += 1;
         console.error(
@@ -1323,6 +1383,18 @@ async function reconcileTable(ctx: JanitorContext): Promise<void> {
         );
       }
     }
+  }
+  if (committedClaimsDeferred > 0) {
+    // A backlog past the cap is otherwise silent: say how many unsettled
+    // claims this sweep left unchecked for the next one.
+    console.log(
+      JSON.stringify({
+        scope: 'reconcile',
+        action: 'committed-claims-deferred',
+        deferred: committedClaimsDeferred,
+        cap: COMMITTED_CLAIM_RECONCILE_CAP,
+      }),
+    );
   }
 
   const vmsById = await buildVmMap(imageVms, rows, ctx.metrics);
@@ -1455,7 +1527,7 @@ async function pruneImageVersions(
 /** Max dead-letter messages a single sweep pulls for stuck-launch recovery — bounds per-sweep work; a larger DLQ drains across sweeps. */
 const DLQ_RECOVERY_BATCH_CAP = 50;
 
-/** Max committed claims the reconciler probes GitHub for per sweep. Each probe is a `getWorkflowJob` REST call on the shared per-installation rate-limit bucket that the janitor's own safety-critical reap reads (`listRunners`/`getRunner`) also draw from — an uncapped scan would, on a busy runner set, exhaust the bucket and stall reaping. A larger backlog drains across sweeps, like the DLQ sweep's cap. */
+/** Max GitHub job reads (`getWorkflowJob`) the committed-claim reconciler makes per sweep. Each read is a REST call on the shared per-installation rate-limit bucket that the janitor's own safety-critical reap reads (`listRunners`/`getRunner`) also draw from — an uncapped scan would, on a busy runner set, exhaust the bucket and stall reaping. Only a read spends a slot: a settled claim (see `RunnerRow.settledAt`) is skipped before any read, and a claim whose VM is still running or suspended makes no GitHub call, so neither spends one. Unsettled claims past the cap are left for the next sweep and logged as `committed-claims-deferred`; a larger backlog drains across sweeps, like the DLQ sweep's cap. */
 const COMMITTED_CLAIM_RECONCILE_CAP = 25;
 
 /** Shape we parse a dead-lettered message down to — only launches are recovered. */
