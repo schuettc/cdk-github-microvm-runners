@@ -132,6 +132,7 @@ interface RowFixture {
   orphanSince?: string;
   runnerId?: number;
   relaunchAttempts?: number;
+  settledAt?: string;
 }
 
 function normalRow(overrides: Partial<RowFixture> = {}): RowFixture {
@@ -2332,6 +2333,222 @@ describe('recoverStuckLaunches: committed-but-unserved claim reconciliation', ()
     await handler();
 
     expect(getWorkflowJobMock.mock.calls.length).toBeLessThanOrEqual(CAP);
+  });
+
+  // --- Settled claims: the cap counts GitHub reads, and a finished job is
+  // stamped `settledAt` so it never takes a slot again. ---
+
+  const CAP = 25;
+  const FUTURE_EXPIRY = Math.floor(NOW_MS / 1000) + 999_999;
+
+  function claimFor(
+    jobId: number,
+    extra: Partial<RowFixture> = {},
+  ): RowFixture {
+    return {
+      runnerName: `job#acme/widgets#${jobId}`,
+      microvmId: `mvm-${jobId}`,
+      repo: 'acme/widgets',
+      jobId,
+      expiresAt: FUTURE_EXPIRY,
+      ...extra,
+    };
+  }
+
+  const STRANDED_JOB = 9999;
+
+  /** Jobs below STRANDED_JOB are finished; the stranded one is still queued. */
+  function finishedExceptStranded(): void {
+    getWorkflowJobMock.mockImplementation(async (_t, _o, _n, jobId) => ({
+      status: jobId === STRANDED_JOB ? 'queued' : 'completed',
+      labels: ['self-hosted', 'microvm'],
+      runId: 42,
+    }));
+  }
+
+  function settleUpdates() {
+    return ddbMock
+      .commandCalls(UpdateItemCommand)
+      .filter((c) =>
+        (c.args[0].input.UpdateExpression ?? '').includes('settledAt'),
+      );
+  }
+
+  function relaunchedJobIds(): number[] {
+    return sqsMock.commandCalls(SendMessageCommand).map(
+      (c) =>
+        (
+          JSON.parse(c.args[0].input.MessageBody as string) as {
+            jobId: number;
+          }
+        ).jobId,
+    );
+  }
+
+  function deferredLines(logSpy: ReturnType<typeof jest.spyOn>) {
+    return logSpy.mock.calls
+      .map((c: unknown[]) => c[0])
+      .filter(
+        (l: unknown): l is string =>
+          typeof l === 'string' && l.includes('committed-claims-deferred'),
+      )
+      .map((l: string) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  it('settles finished claims so a stranded claim behind 30 of them is relaunched on the next sweep', async () => {
+    enableRecovery();
+    const finished = Array.from({ length: 30 }, (_, i) => claimFor(3000 + i));
+    const stranded = claimFor(STRANDED_JOB);
+    setTableRows([...finished, stranded]);
+    finishedExceptStranded();
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    // Sweep one: 25 GitHub reads, all finished -> 25 stamps; the stranded
+    // claim is past the cap.
+    await handler();
+
+    expect(getWorkflowJobMock).toHaveBeenCalledTimes(CAP);
+    const stamped = settleUpdates().map(
+      (c) => c.args[0].input.Key?.runnerName?.S as string,
+    );
+    expect(stamped).toHaveLength(CAP);
+    expect(stamped).not.toContain(stranded.runnerName);
+    expect(relaunchedJobIds()).toEqual([]);
+
+    // Sweep two: feed the stamped rows back as settled.
+    const stampedSet = new Set(stamped);
+    setTableRows([
+      ...finished.map((r) =>
+        stampedSet.has(r.runnerName) ? { ...r, settledAt: NOW_ISO } : r,
+      ),
+      stranded,
+    ]);
+    getWorkflowJobMock.mockClear();
+    sqsMock.resetHistory();
+
+    await handler();
+
+    // 5 unsettled finished claims + the stranded one = 6 reads, well under cap.
+    expect(getWorkflowJobMock).toHaveBeenCalledTimes(6);
+    expect(relaunchedJobIds()).toEqual([STRANDED_JOB]);
+    jest.restoreAllMocks();
+  });
+
+  it('a settled claim gets no GetMicrovm and no GitHub read', async () => {
+    enableRecovery();
+    setTableRows([claimFor(4000, { settledAt: isoMinusSeconds(600) })]);
+    finishedExceptStranded();
+
+    await handler();
+
+    expect(
+      mvmMock
+        .commandCalls(GetMicrovmCommand)
+        .filter((c) => c.args[0].input.microvmIdentifier === 'mvm-4000'),
+    ).toHaveLength(0);
+    expect(getWorkflowJobMock).not.toHaveBeenCalled();
+    expect(settleUpdates()).toHaveLength(0);
+  });
+
+  it('a claim whose VM is still running takes no slot: a stranded claim behind 26 of them is relaunched in one sweep', async () => {
+    enableRecovery();
+    const alive = Array.from({ length: CAP + 1 }, (_, i) => claimFor(5000 + i));
+    setTableRows([...alive, claimFor(STRANDED_JOB)]);
+    for (const r of alive) {
+      mvmMock
+        .on(GetMicrovmCommand, { microvmIdentifier: r.microvmId })
+        .resolves({
+          microvmId: r.microvmId,
+          state: 'RUNNING' as never,
+          imageArn: IMAGE_ARN_DEFAULT,
+          imageVersion: '1',
+          startedAt: new Date(NOW_MS - 60_000),
+        });
+    }
+    finishedExceptStranded();
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(getWorkflowJobMock).toHaveBeenCalledTimes(1);
+    expect(relaunchedJobIds()).toEqual([STRANDED_JOB]);
+    jest.restoreAllMocks();
+  });
+
+  it('stamps a finished claim with a conditional UpdateItem (attribute_exists), never an upsert', async () => {
+    enableRecovery();
+    setTableRows([claimFor(6000)]);
+    getWorkflowJobMock.mockResolvedValue(undefined); // job gone
+
+    await handler();
+
+    const stamps = settleUpdates();
+    expect(stamps).toHaveLength(1);
+    const input = stamps[0].args[0].input;
+    expect(input.Key?.runnerName?.S).toBe('job#acme/widgets#6000');
+    expect(input.UpdateExpression).toBe('SET settledAt = :t');
+    expect(input.ExpressionAttributeValues?.[':t']?.S).toBe(NOW_ISO);
+    expect(input.ConditionExpression).toBe('attribute_exists(runnerName)');
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+  });
+
+  it('a failed stamp is counted in errors and does not abort the sweep', async () => {
+    enableRecovery();
+    setTableRows([claimFor(6100), claimFor(STRANDED_JOB)]);
+    finishedExceptStranded();
+    ddbMock.on(UpdateItemCommand).rejects(new Error('ddb down'));
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(handler()).resolves.toBeUndefined();
+
+    expect(relaunchedJobIds()).toEqual([STRANDED_JOB]);
+    expect(sweepCounters(logSpy).errors).toBeGreaterThanOrEqual(1);
+    jest.restoreAllMocks();
+  });
+
+  it('logs how many unsettled claims the cap deferred', async () => {
+    enableRecovery();
+    // 31 dead-VM finished claims, 2 settled ones mixed in after the cap:
+    // 25 are read, the 6 unsettled rest are deferred, settled ones are not.
+    setTableRows([
+      ...Array.from({ length: 31 }, (_, i) => claimFor(7000 + i)),
+      claimFor(7100, { settledAt: NOW_ISO }),
+      claimFor(7101, { settledAt: NOW_ISO }),
+    ]);
+    finishedExceptStranded();
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(deferredLines(logSpy)).toEqual([
+      {
+        scope: 'reconcile',
+        action: 'committed-claims-deferred',
+        deferred: 6,
+        cap: CAP,
+      },
+    ]);
+    jest.restoreAllMocks();
+  });
+
+  it('logs no deferred line when the cap deferred nothing', async () => {
+    enableRecovery();
+    setTableRows(Array.from({ length: CAP }, (_, i) => claimFor(8000 + i)));
+    finishedExceptStranded();
+    const logSpy = jest
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined);
+
+    await handler();
+
+    expect(getWorkflowJobMock).toHaveBeenCalledTimes(CAP);
+    expect(deferredLines(logSpy)).toEqual([]);
+    jest.restoreAllMocks();
   });
 });
 
