@@ -148,6 +148,13 @@ launches often enough to need it. Treat a persistently high count as a signal to
 find that cause, not as a healthy steady state. Setting the property to false
 silences the counter along with the recovery itself.
 
+The committed-claim reconciliation reads at most 25 jobs from GitHub per sweep.
+Once it finds a claim's job no longer queued it marks the claim settled and
+never reads it again, and a claim whose VM is still running costs no read, so
+the 25 go to claims that may actually be stranded. When a sweep runs out of
+reads with unsettled claims still unchecked, the janitor logs one
+`committed-claims-deferred` line with how many it left for the next sweep.
+
 `recoverStuckLaunches` also re-launches a job the instant its runner is reaped as
 `unregistered` — a VM that launched but never registered with GitHub, so the job
 never ran and stayed `queued`. The `unregisteredRelaunched()` counter reports
